@@ -1,0 +1,54 @@
+<link rel="stylesheet" href="style.css">
+
+<div class="migration-assistant-settings" id="migration_assistant_settings" data-theme="dark">
+    <div class="inline-drawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+            <b data-i18n="Migration Assistant">Migration Assistant</b>
+            <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+            <div class="migasst-settings-card">
+                <div class="migasst-settings-card-mark" aria-hidden="true"></div>
+                <div class="migasst-settings-card-body">
+                    <p class="migasst-settings-kicker">CharacterAI → SillyTavern</p>
+                    <p class="migasst-settings-copy" data-i18n="migasst_settings_blurb">
+                        Migrate CharacterAI exports into SillyTavern. Review chat sorting and character matches before anything is imported.
+                    </p>
+                    <div class="migasst-settings-actions">
+                        <button type="button" id="migasst_open_wizard" class="migasst-btn migasst-btn-primary"
+                            data-i18n="Open Migration Wizard">Open Migration Wizard</button>
+                        <label class="migasst-theme-toggle">
+                            <span id="migasst_theme_label">Dark mode</span>
+                            <input type="checkbox" id="migasst_theme_toggle" role="switch" aria-label="Dark mode" checked aria-checked="true">
+                            <span class="migasst-theme-track" aria-hidden="true"></span>
+                        </label>
+                    </div>
+                    <div id="migasst_plugin_status" class="migasst-plugin-status" aria-live="polite"></div>
+                </div>
+            </div>
+
+            <script>
+                (() => {
+                    const settings = document.getElementById('migration_assistant_settings');
+                    const toggle = document.getElementById('migasst_theme_toggle');
+                    const label = document.getElementById('migasst_theme_label');
+                    if (!settings || !toggle) {
+                        return;
+                    }
+
+                    const applyTheme = () => {
+                        const theme = toggle.checked ? 'dark' : 'light';
+                        settings.setAttribute('data-theme', theme);
+                        toggle.setAttribute('aria-checked', String(toggle.checked));
+                        if (label) {
+                            label.textContent = toggle.checked ? 'Dark mode' : 'Light mode';
+                        }
+                    };
+
+                    toggle.addEventListener('change', applyTheme);
+                    applyTheme();
+                })();
+            </script>
+        </div>
+    </div>
+</div>

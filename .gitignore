@@ -1,0 +1,13 @@
+node_modules/
+*.zip
+**/data/message.json
+**/data/character.json
+**/data/user.json
+_analysis.txt
+_speakers.txt
+.DS_Store
+Thumbs.db
+*Diagram*
+*.png
+*.jpg
+*.jpeg
