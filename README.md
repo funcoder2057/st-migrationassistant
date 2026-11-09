@@ -12,29 +12,17 @@ SillyTavern extension + server plugin that migrates **CharacterAI data exports**
 
 ## Install
 
-### 1. UI extension
+## Web Extension
+1. In SillyTavern, open the "Extensions" menu
+2. Click "Install extension"
+3. Paste in ``https://github.com/funcoder2057/st-migrationassistant`` and ``main`` or another branch
+4. Click either "Install for all users" or "Install just for me", depending on your needs.
 
-Copy or clone this repo into:
-
-`SillyTavern/public/scripts/extensions/third-party/st-migrationasst`
-
-Enable **Migration Assistant** under Extensions.
-
-### 2. Server plugin
-
-```bash
-cp -r server-plugin SillyTavern/plugins/migration-assistant
-cd SillyTavern/plugins/migration-assistant
-npm install
-```
-
-In `config.yaml`:
-
-```yaml
-enableServerPlugins: true
-```
-
-Restart SillyTavern. The UI status line should read **Server plugin connected.**
+## Server Plugin
+1. In 'Releases', download the st-migrationassistant.zip release
+2. Extract it into the plugins folder
+3. Ensure ServerPlugins are enabled in ``config.yaml`` in SillyTavern's configs
+4. Restart the Server
 
 ## Workflow
 
