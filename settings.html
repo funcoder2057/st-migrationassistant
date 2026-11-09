@@ -15,12 +15,12 @@
                         Migrate CharacterAI exports into SillyTavern. Review chat sorting and character matches before anything is imported.
                     </p>
                     <div class="migasst-settings-actions">
-                        <button type="button" id="migasst_open_settings_page" class="migasst-btn migasst-btn-ghost"
-                            data-i18n="Open Settings Page">Open Settings Page</button>
-                        <button type="button" id="migasst_resume_migration" class="migasst-btn migasst-btn-ghost" hidden
-                            data-i18n="Resume Migration">Resume Migration</button>
-                        <button type="button" id="migasst_open_wizard" class="migasst-btn migasst-btn-primary"
-                            data-i18n="Begin Migration">Begin Migration</button>
+                        <input type="submit" id="migasst_open_settings_page" class="menu_button migasst-btn migasst-btn-ghost"
+                            value="Open Settings Page" data-i18n="[value]Open Settings Page">
+                        <input type="submit" id="migasst_resume_migration" class="menu_button migasst-btn migasst-btn-ghost" hidden
+                            value="Resume Migration" data-i18n="[value]Resume Migration">
+                        <input type="submit" id="migasst_open_wizard" class="menu_button migasst-btn migasst-btn-primary"
+                            value="Begin Migration" data-i18n="[value]Begin Migration">
                         <label class="migasst-theme-toggle">
                             <span id="migasst_theme_label">Dark mode</span>
                             <input type="checkbox" id="migasst_theme_toggle" role="switch" aria-label="Dark mode" checked aria-checked="true">
@@ -40,6 +40,9 @@
 
 <script>
     (() => {
+        if (window.SillyTavern) {
+            return;
+        }
         const settings = document.getElementById('migration_assistant_settings');
         const toggle = document.getElementById('migasst_theme_toggle');
         const label = document.getElementById('migasst_theme_label');
@@ -63,14 +66,26 @@
         toggle.addEventListener('change', applyTheme);
         document.getElementById('migasst_open_settings_page')?.setAttribute('hidden', '');
         document.getElementById('migasst_open_wizard')?.addEventListener('click', () => {
-            if (window.opener) {
-                window.opener.postMessage({ type: 'migasst:begin-migration' }, window.location.origin);
-                window.close();
+            if (window.location.protocol === 'file:') {
+                const status = document.getElementById('migasst_plugin_status');
+                if (status) {
+                    status.textContent = 'Open this settings page from SillyTavern to begin a migration in a new window.';
+                }
                 return;
             }
-            const status = document.getElementById('migasst_plugin_status');
-            if (status) {
-                status.textContent = 'Open this page from the Migration Assistant settings in SillyTavern to begin.';
+            let target;
+            try {
+                target = new URL(window.opener?.location.href || '/', window.location.origin);
+            } catch {
+                target = new URL(`${window.location.origin}/`);
+            }
+            target.searchParams.set('migasst_begin_migration', '1');
+            const migrationWindow = window.open(target.toString(), '_blank', 'popup,width=1280,height=900');
+            if (!migrationWindow) {
+                const status = document.getElementById('migasst_plugin_status');
+                if (status) {
+                    status.textContent = 'Allow pop-ups to open the Migration Assistant in a new window.';
+                }
             }
         });
         applyTheme();

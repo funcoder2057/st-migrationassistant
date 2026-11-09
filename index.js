@@ -1,6 +1,7 @@
 import { searchCharactersByGreeting, searchCharactersByQuery } from './api.js';
 import { getUserAvatars, initPersona } from '../../../../scripts/personas.js';
-import { getRequestHeaders } from '../../../../script.js';
+import { getRequestHeaders, saveSettingsDebounced } from '../../../../script.js';
+import { extension_settings } from '../../../extensions.js';
 
 const MODULE_NAME = 'st-migrationasst';
 const PLUGIN_ID = 'migration-assistant';
@@ -12,6 +13,7 @@ const THEME_STORAGE_KEY = 'migasst-theme-v2';
 const CLIENT_KEY_STORAGE_KEY = 'migasst-client-key-v1';
 const PROGRESS_DB_NAME = 'migasst-progress-v1';
 const PROGRESS_STORE_NAME = 'workflows';
+const BEGIN_MIGRATION_PARAM = 'migasst_begin_migration';
 
 const STEP_META = {
     upload: { title: 'Drop your export', next: 'Continue' },
@@ -50,7 +52,6 @@ let progressWriteQueue = Promise.resolve();
 let serverStepWriteQueue = Promise.resolve();
 let progressSaveTimer = null;
 let activeUploadController = null;
-let settingsPageWindow = null;
 
 function getContext() {
     return SillyTavern.getContext();
@@ -553,10 +554,17 @@ function applyTheme(theme) {
         label.textContent = selected === 'dark' ? 'Dark mode' : 'Light mode';
     }
     localStorage.setItem(THEME_STORAGE_KEY, selected);
+    extension_settings[MODULE_NAME] = extension_settings[MODULE_NAME] || {};
+    extension_settings[MODULE_NAME].theme = selected;
+    saveSettingsDebounced();
 }
 
 function initializeTheme() {
-    applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || 'dark');
+    extension_settings[MODULE_NAME] = extension_settings[MODULE_NAME] || {};
+    const savedTheme = extension_settings[MODULE_NAME].theme
+        || localStorage.getItem(THEME_STORAGE_KEY)
+        || 'dark';
+    applyTheme(savedTheme);
 }
 
 function openWizard() {
@@ -578,6 +586,25 @@ function closeWizard() {
     }
     document.body.style.overflow = '';
     void persistProgress();
+}
+
+function openMigrationWindow() {
+    const target = new URL(window.location.href);
+    target.searchParams.set(BEGIN_MIGRATION_PARAM, '1');
+    const migrationWindow = window.open(target.toString(), '_blank', 'popup,width=1280,height=900');
+    if (!migrationWindow) {
+        toastr.warning('Allow pop-ups to open the Migration Assistant in a new window.');
+    }
+}
+
+function consumeBeginMigrationRequest() {
+    const currentUrl = new URL(window.location.href);
+    if (currentUrl.searchParams.get(BEGIN_MIGRATION_PARAM) !== '1') {
+        return false;
+    }
+    currentUrl.searchParams.delete(BEGIN_MIGRATION_PARAM);
+    history.replaceState(history.state, '', currentUrl);
+    return true;
 }
 
 function setNextLabel(label) {
@@ -1777,14 +1804,13 @@ async function mountUi() {
     }
 
     ensureAssets();
-    const { renderExtensionTemplateAsync } = getContext();
-    const templateFolder = `third-party/${MODULE_NAME}`;
+    const $settingsHost = $(settingsHost);
     if (!document.getElementById('migration_assistant_settings')) {
-        const settingsHtml = await renderExtensionTemplateAsync(templateFolder, 'settings');
-        $(settingsHost).append(settingsHtml);
+        const settingsHtml = await $.get(`${EXTENSION_FOLDER}/settings.html`);
+        $settingsHost.append(settingsHtml);
     }
     if (!document.getElementById('migasst_wizard')) {
-        const wizardHtml = await renderExtensionTemplateAsync(templateFolder, 'wizard');
+        const wizardHtml = await $.get(`${EXTENSION_FOLDER}/wizard.html`);
         $('body').append(wizardHtml);
     }
     const wizard = document.getElementById('migasst_wizard');
@@ -1792,26 +1818,15 @@ async function mountUi() {
         wizard.hidden = true;
     }
 
-    const openBtn = document.getElementById('migasst_open_wizard');
-    openBtn?.addEventListener('click', openWizard);
-    document.getElementById('migasst_resume_migration')?.addEventListener('click', openWizard);
-    document.getElementById('migasst_open_settings_page')?.addEventListener('click', () => {
-        settingsPageWindow = window.open(`${EXTENSION_FOLDER}/settings.html`, '_blank');
+    $settingsHost.on('click', '#migasst_open_wizard, #migasst_resume_migration', openMigrationWindow);
+    $settingsHost.on('click', '#migasst_open_settings_page', () => {
+        const settingsPageWindow = window.open(`${EXTENSION_FOLDER}/settings.html`, '_blank', 'popup,width=760,height=720');
         if (!settingsPageWindow) {
             toastr.warning('Allow pop-ups to open the full settings page.');
         }
     });
-    window.addEventListener('message', (event) => {
-        if (event.origin !== window.location.origin
-            || event.source !== settingsPageWindow) {
-            return;
-        }
-        if (event.data?.type === 'migasst:begin-migration') {
-            settingsPageWindow = null;
-            openWizard();
-        } else if (event.data?.type === 'migasst:theme-change') {
-            applyTheme(event.data.theme);
-        }
+    $settingsHost.on('input', '#migasst_theme_toggle', (event) => {
+        applyTheme(event.target.checked ? 'dark' : 'light');
     });
     window.addEventListener('pagehide', () => {
         if (progressSaveTimer) {
@@ -1819,9 +1834,6 @@ async function mountUi() {
             progressSaveTimer = null;
         }
         void persistProgress();
-    });
-    document.getElementById('migasst_theme_toggle')?.addEventListener('change', (event) => {
-        applyTheme(event.target.checked ? 'dark' : 'light');
     });
     initializeTheme();
     bindWizardEvents(document.getElementById('migasst_wizard'));
@@ -1836,6 +1848,9 @@ async function mountUi() {
     if (alive) {
         await restoreSession();
         updateSessionButtons();
+    }
+    if (consumeBeginMigrationRequest()) {
+        openWizard();
     }
 }
 
