@@ -9,6 +9,9 @@ const EXTENSION_FOLDER = `scripts/extensions/third-party/${MODULE_NAME}`;
 
 const STEPS = ['upload', 'chats', 'match', 'search', 'import', 'profiles'];
 const THEME_STORAGE_KEY = 'migasst-theme-v2';
+const CLIENT_KEY_STORAGE_KEY = 'migasst-client-key-v1';
+const PROGRESS_DB_NAME = 'migasst-progress-v1';
+const PROGRESS_STORE_NAME = 'workflows';
 
 const STEP_META = {
     upload: { title: 'Drop your export', next: 'Continue' },
@@ -33,10 +36,21 @@ const state = {
     openChatId: null,
     /** @type {Map<string, object>} */
     searchHits: new Map(),
+    searchDrafts: new Map(),
     profiles: [],
     profilesImported: false,
     importCompleted: false,
+    importPrepared: false,
+    importedClusterIds: new Set(),
+    clientKey: null,
 };
+
+let progressDbPromise = null;
+let progressWriteQueue = Promise.resolve();
+let serverStepWriteQueue = Promise.resolve();
+let progressSaveTimer = null;
+let activeUploadController = null;
+let settingsPageWindow = null;
 
 function getContext() {
     return SillyTavern.getContext();
@@ -243,6 +257,240 @@ async function apiFetch(path, options = {}) {
     return res.json();
 }
 
+function getClientKey() {
+    let key = localStorage.getItem(CLIENT_KEY_STORAGE_KEY);
+    if (!key) {
+        const bytes = crypto.getRandomValues(new Uint8Array(24));
+        key = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+        localStorage.setItem(CLIENT_KEY_STORAGE_KEY, key);
+    }
+    return key;
+}
+
+function openProgressDb() {
+    if (!globalThis.indexedDB) {
+        return Promise.reject(new Error('This browser does not support resumable migration storage.'));
+    }
+    if (!progressDbPromise) {
+        progressDbPromise = new Promise((resolve, reject) => {
+            const request = indexedDB.open(PROGRESS_DB_NAME, 1);
+            request.onupgradeneeded = () => {
+                if (!request.result.objectStoreNames.contains(PROGRESS_STORE_NAME)) {
+                    request.result.createObjectStore(PROGRESS_STORE_NAME);
+                }
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error || new Error('Could not open migration progress storage.'));
+        });
+    }
+    return progressDbPromise;
+}
+
+function makeProgressSnapshot() {
+    return {
+        sessionId: state.sessionId,
+        step: state.step,
+        chats: state.chats,
+        characters: state.characters,
+        clusters: state.clusters,
+        planItems: state.planItems,
+        chatOverrides: [...state.chatOverrides.entries()],
+        matchOverrides: [...state.matchOverrides.entries()],
+        searchHits: [...state.searchHits.entries()],
+        searchDrafts: [...state.searchDrafts.entries()],
+        profiles: state.profiles,
+        profilesImported: state.profilesImported,
+        importCompleted: state.importCompleted,
+        importPrepared: state.importPrepared,
+        importedClusterIds: [...state.importedClusterIds],
+    };
+}
+
+function persistProgressSoon() {
+    if (progressSaveTimer) {
+        clearTimeout(progressSaveTimer);
+    }
+    progressSaveTimer = setTimeout(() => {
+        progressSaveTimer = null;
+        void persistProgress();
+    }, 250);
+}
+
+function persistProgress() {
+    if (!state.clientKey) {
+        return Promise.resolve();
+    }
+    const clientKey = state.clientKey;
+    document.querySelectorAll('#migasst_search_list [data-cluster-id]').forEach((row) => {
+        const fields = {};
+        row.querySelectorAll('[data-field]').forEach((input) => {
+            if (input.type !== 'file') {
+                fields[input.dataset.field] = input.value;
+            }
+        });
+        state.searchDrafts.set(row.dataset.clusterId, {
+            fields,
+            cardImage: row.dataset.cardImage || null,
+        });
+    });
+    const snapshot = makeProgressSnapshot();
+    progressWriteQueue = progressWriteQueue.then(async () => {
+        const db = await openProgressDb();
+        await new Promise((resolve, reject) => {
+            const transaction = db.transaction(PROGRESS_STORE_NAME, 'readwrite');
+            transaction.objectStore(PROGRESS_STORE_NAME).put(snapshot, clientKey);
+            transaction.oncomplete = resolve;
+            transaction.onerror = () => reject(transaction.error || new Error('Could not save migration progress.'));
+            transaction.onabort = () => reject(transaction.error || new Error('Migration progress save was cancelled.'));
+        });
+    }).catch((error) => {
+        console.error('[migration-assistant] could not save migration progress:', error);
+        const status = document.getElementById('migasst_plugin_status');
+        if (status) {
+            status.textContent = `Migration progress could not be saved: ${error.message}`;
+        }
+    });
+    return progressWriteQueue;
+}
+
+async function loadProgress(clientKey) {
+    const db = await openProgressDb();
+    return new Promise((resolve, reject) => {
+        const request = db.transaction(PROGRESS_STORE_NAME, 'readonly')
+            .objectStore(PROGRESS_STORE_NAME)
+            .get(clientKey);
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () => reject(request.error || new Error('Could not read saved migration progress.'));
+    });
+}
+
+async function deleteProgress(clientKey) {
+    await progressWriteQueue;
+    const db = await openProgressDb();
+    await new Promise((resolve, reject) => {
+        const transaction = db.transaction(PROGRESS_STORE_NAME, 'readwrite');
+        transaction.objectStore(PROGRESS_STORE_NAME).delete(clientKey);
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error || new Error('Could not clear migration progress.'));
+    });
+}
+
+function updateSessionButtons() {
+    const resume = document.getElementById('migasst_resume_migration');
+    if (resume) {
+        resume.hidden = !state.sessionId;
+    }
+}
+
+function saveServerStep(sessionId, step) {
+    serverStepWriteQueue = serverStepWriteQueue.then(() => apiFetch(`/session/${sessionId}/progress`, {
+        method: 'POST',
+        body: { step },
+    })).catch((error) => {
+        console.error('[migration-assistant] could not save migration step:', error);
+    });
+}
+
+function restoreSnapshot(snapshot, saved) {
+    state.sessionId = snapshot.sessionId;
+    state.clientKey = getClientKey();
+    state.chats = snapshot.chats || [];
+    state.characters = snapshot.characters || [];
+    state.clusters = snapshot.clusters || [];
+    state.planItems = snapshot.planItems || [];
+    state.stats = snapshot.stats || null;
+    state.chatOverrides = new Map(saved?.chatOverrides || snapshot.chatOverrides?.map((item) => [item.chatId, item]) || []);
+    state.matchOverrides = new Map(saved?.matchOverrides || snapshot.matchOverrides?.map((item) => [item.clusterId, item]) || []);
+    state.searchHits = new Map(saved?.searchHits || []);
+    state.searchDrafts = new Map(saved?.searchDrafts || []);
+    state.profiles = saved?.profiles || [];
+    state.profilesImported = !!saved?.profilesImported;
+    state.importCompleted = !!saved?.importCompleted;
+    state.importPrepared = !!(snapshot.importPrepared || saved?.importPrepared);
+    state.importedClusterIds = new Set(saved?.importedClusterIds || []);
+    const savedStep = STEPS.includes(snapshot.step)
+        ? snapshot.step
+        : saved?.sessionId === snapshot.sessionId && STEPS.includes(saved.step)
+            ? saved.step
+            : 'upload';
+    state.step = savedStep === 'profiles' && !state.importCompleted && state.importPrepared
+        ? 'import'
+        : savedStep;
+    renderChatList();
+    renderMatchList();
+    renderSearchList();
+    renderImportList();
+    renderProfileList();
+    const matchStats = document.getElementById('migasst_match_stats');
+    if (matchStats && snapshot.matchSummary) {
+        matchStats.textContent = `${snapshot.matchSummary.total} clusters · ${snapshot.matchSummary.matchedExport} export-matched · ${snapshot.matchSummary.needsSearch} need search`;
+    }
+    const importStats = document.getElementById('migasst_import_stats');
+    if (importStats && snapshot.planSummary) {
+        importStats.textContent = `${snapshot.planSummary.characters} characters · ${snapshot.planSummary.chats} chats · ${snapshot.planSummary.messages} messages`;
+    }
+    if (snapshot.importPrepared && !state.importCompleted) {
+        setStatus(document.getElementById('migasst_import_result'), 'Import was interrupted. Resume to continue without repeating completed characters.');
+    }
+    for (const [clusterId, draft] of state.searchDrafts) {
+        const row = document.querySelector(`#migasst_search_list [data-cluster-id="${CSS.escape(clusterId)}"]`);
+        if (!row) {
+            continue;
+        }
+        for (const [field, value] of Object.entries(draft.fields || {})) {
+            const input = row.querySelector(`[data-field="${field}"]`);
+            if (input && input.type !== 'file') {
+                input.value = value;
+            }
+        }
+        if (draft.cardImage) {
+            row.dataset.cardImage = draft.cardImage;
+        }
+    }
+    updateSessionButtons();
+    goToStep(state.step);
+    persistProgress();
+}
+
+async function restoreSession() {
+    const clientKey = localStorage.getItem(CLIENT_KEY_STORAGE_KEY);
+    if (!clientKey || !/^[a-f0-9]{48}$/.test(clientKey)) {
+        return false;
+    }
+    state.clientKey = clientKey;
+    try {
+        const saved = await loadProgress(clientKey);
+        let snapshot;
+        if (saved?.sessionId) {
+            try {
+                snapshot = await apiFetch(`/session/${saved.sessionId}/state`);
+            } catch (error) {
+                if (!/session not found|expired/i.test(error.message)) {
+                    throw error;
+                }
+            }
+        }
+        if (!snapshot) {
+            snapshot = await apiFetch(`/session/restore/${clientKey}`);
+        }
+        restoreSnapshot(snapshot, saved);
+        const status = document.getElementById('migasst_plugin_status');
+        if (status) {
+            status.textContent = 'An unfinished migration is ready to resume.';
+        }
+        return true;
+    } catch (error) {
+        if (!/no active migration|not ready|session not found|expired/i.test(error.message)) {
+            console.error('[migration-assistant] could not restore migration:', error);
+            const status = document.getElementById('migasst_plugin_status');
+            if (status) {
+                status.textContent = `Could not resume migration: ${error.message}`;
+            }
+        }
+        return false;
+    }
+}
+
 async function probePlugin() {
     try {
         const res = await fetch(`${PLUGIN_BASE}/probe`, { method: 'GET' });
@@ -329,6 +577,7 @@ function closeWizard() {
         wizard.hidden = true;
     }
     document.body.style.overflow = '';
+    void persistProgress();
 }
 
 function setNextLabel(label) {
@@ -387,7 +636,7 @@ function goToStep(step) {
         back.disabled = step === 'upload';
     }
     if (danger) {
-        danger.hidden = !state.sessionId;
+        danger.hidden = !(state.sessionId || state.clientKey);
     }
     if (next) {
         next.disabled = step === 'upload' ? !state.sessionId : false;
@@ -397,6 +646,11 @@ function goToStep(step) {
                 ? 'Continue to optional stage'
                 : STEP_META[step]?.next || 'Continue';
         setNextLabel(label);
+    }
+    updateSessionButtons();
+    void persistProgress();
+    if (state.sessionId) {
+        saveServerStep(state.sessionId, step);
     }
 }
 
@@ -414,23 +668,43 @@ async function handleUpload(file) {
     }
     setStatus(status, isZip ? 'Uploading and parsing export…' : 'Uploading and parsing messages…');
     const form = new FormData();
+    state.clientKey = getClientKey();
+    form.append('clientKey', state.clientKey);
     form.append('export', file, file.name);
+    const cancelButton = document.getElementById('migasst_danger');
+    if (cancelButton) {
+        cancelButton.hidden = false;
+    }
+    const controller = new AbortController();
+    activeUploadController = controller;
+    void persistProgress();
     try {
-        const data = await apiFetch('/upload', { method: 'POST', body: form });
+        const data = await apiFetch('/upload', { method: 'POST', body: form, signal: controller.signal });
         state.sessionId = data.sessionId;
         state.chats = data.chats || [];
         state.characters = data.characters || [];
         state.stats = data.stats || null;
         state.chatOverrides = new Map();
         state.matchOverrides = new Map();
+        state.importCompleted = false;
+        state.importPrepared = false;
+        state.importedClusterIds.clear();
         const characterLabel = data.stats?.characterCount
             ? ` · ${data.stats.characterCount} export characters`
             : ' · no character data (you can add cards later)';
         setStatus(status, `Parsed ${data.stats?.chatCount ?? 0} chats · ${data.stats?.messageCount ?? 0} messages${characterLabel}.`);
         renderChatList();
+        updateSessionButtons();
+        void persistProgress();
         goToStep('chats');
     } catch (error) {
-        setStatus(status, error.message || 'Upload failed.', true);
+        if (error.name !== 'AbortError') {
+            setStatus(status, error.message || 'Upload failed.', true);
+        }
+    } finally {
+        if (activeUploadController === controller) {
+            activeUploadController = null;
+        }
     }
 }
 
@@ -528,6 +802,7 @@ function flipMessageRole(index) {
     }
     state.chatOverrides.set(state.openChatId, { ...current, chatId: state.openChatId, roles });
     openChatDrawer(state.openChatId);
+    persistProgressSoon();
 }
 
 async function confirmChatsAndMatch() {
@@ -607,7 +882,17 @@ function renderSearchList() {
         list.innerHTML = '<div class="migasst-status">No clusters need external search. Continue to import.</div>';
         return;
     }
-    list.innerHTML = needing.map((cluster, i) => `
+    list.innerHTML = needing.map((cluster, i) => {
+        const results = [...state.searchHits.entries()]
+            .filter(([hitId]) => hitId.startsWith(`${cluster.clusterId}:`))
+            .map(([hitId, hit]) => `
+                <div class="migasst-msg">
+                    <div class="migasst-msg-top"><span>${escapeHtml(hit.name)}</span>
+                    <button type="button" class="migasst-btn migasst-btn-primary migasst-btn-small" data-action="apply-search" data-hit-id="${escapeHtml(hitId)}">Use</button></div>
+                    <div class="migasst-msg-body">${escapeHtml((hit.greeting || '').slice(0, 240))}</div>
+                </div>`)
+            .join('');
+        return `
         <article class="migasst-row is-warn" data-cluster-id="${escapeHtml(cluster.clusterId)}" style="animation-delay:${Math.min(i, 12) * 25}ms">
             <div>
                 <p class="migasst-row-title">${escapeHtml(cluster.match?.name || 'Needs character')}</p>
@@ -626,7 +911,7 @@ function renderSearchList() {
                     </label>
                     <input class="migasst-input" data-field="query" placeholder="Search query (API stub)">
                 </div>
-                <div class="migasst-search-results" data-results></div>
+                <div class="migasst-search-results" data-results>${results}</div>
             </div>
             <div class="migasst-row-actions">
                 <button type="button" class="migasst-btn migasst-btn-primary migasst-btn-small" data-action="search-greeting">Search greeting</button>
@@ -635,7 +920,8 @@ function renderSearchList() {
                 <button type="button" class="migasst-btn migasst-btn-danger migasst-btn-small" data-action="skip-cluster">Skip</button>
             </div>
         </article>
-    `).join('');
+    `;
+    }).join('');
 }
 
 async function runClusterSearch(clusterId, mode) {
@@ -682,6 +968,7 @@ async function runClusterSearch(clusterId, mode) {
             resultsEl.innerHTML = `<p class="migasst-status is-error">${escapeHtml(error.message)}</p>`;
         }
     }
+    persistProgressSoon();
 }
 
 async function saveManualCharacter(clusterId, row) {
@@ -710,6 +997,7 @@ async function saveManualCharacter(clusterId, row) {
             imageUrl,
         },
     });
+    await persistProgress();
 }
 
 async function loadCardIntoSearchRow(file, row) {
@@ -728,6 +1016,7 @@ async function loadCardIntoSearchRow(file, row) {
         row.dataset.cardImage = hasSmallImage
             ? await readAsDataUrl(file)
             : '';
+        persistProgressSoon();
         toastr.success(`Loaded character card: ${card.name}`);
         if (isPng && !hasSmallImage) {
             toastr.info('Card details loaded; the PNG is too large to attach as an avatar. Choose a smaller image if needed.');
@@ -819,25 +1108,32 @@ async function runImport() {
             method: 'POST',
             body: { excludeClusterIds },
         });
-        state.importCompleted = true;
+        state.importPrepared = true;
+        await persistProgress();
 
-        // Best-effort import into SillyTavern via public character import endpoint when available.
         let imported = 0;
         const failures = [];
-        const { Popup } = getContext();
         for (const payload of data.payloads || []) {
+            if (state.importedClusterIds.has(payload.clusterId)) {
+                continue;
+            }
             try {
                 await importCharacterPayload(payload);
                 imported += 1;
+                state.importedClusterIds.add(payload.clusterId);
+                await persistProgress();
             } catch (error) {
                 failures.push(`${payload.character?.name || 'Character'}: ${error.message}`);
             }
         }
 
         setStatus(result, `Prepared ${data.count} package(s). Imported ${imported}${failures.length ? `; ${failures.length} failed: ${failures.join('; ')}` : ''}.`);
-        if (Popup?.show?.text) {
-            await Popup.show.text('Migration Assistant', `Prepared ${data.count} package(s). Imported ${imported}.`);
+        if (failures.length) {
+            await persistProgress();
+            return;
         }
+        state.importCompleted = true;
+        await persistProgress();
         goToStep('profiles');
     } catch (error) {
         setStatus(result, error.message || 'Import failed.', true);
@@ -1066,6 +1362,7 @@ async function addProfileFiles(files) {
         setNextLabel(state.profilesImported ? 'Done' : state.profiles.some((profile) => profile.include && profile.type) ? 'Import selected profiles' : 'Skip & finish');
     }
     setStatus(status, `${added} file(s) ready.${errors.length ? ` ${errors.join(' ')}` : ''}`, errors.length > 0);
+    await persistProgress();
 }
 
 async function importPersona(profile) {
@@ -1119,6 +1416,7 @@ async function importProfiles() {
             }
             imported += 1;
             profile.include = false;
+            await persistProgress();
         } catch (error) {
             failures.push(`${profile.card.name}: ${error.message}`);
         }
@@ -1137,34 +1435,63 @@ function finishProfiles(message, isError = false) {
     state.profilesImported = true;
     setStatus(document.getElementById('migasst_profile_status'), message, isError);
     setNextLabel('Done');
+    void persistProgress();
 }
 
 async function discardSession() {
-    if (!state.sessionId) {
+    if (!state.sessionId && !state.clientKey) {
         closeWizard();
         return;
     }
     const { Popup } = getContext();
     const ok = Popup?.show?.confirm
-        ? await Popup.show.confirm('Discard session?', 'Temporary parse data for this migration will be deleted.')
-        : window.confirm('Discard migration session?');
+        ? await Popup.show.confirm('Cancel migration?', 'This deletes the saved progress and temporary migration data. Closing the wizard keeps it available to resume.')
+        : window.confirm('Cancel migration and delete its saved progress?');
     if (!ok) {
         return;
     }
     try {
-        await apiFetch(`/session/${state.sessionId}`, { method: 'DELETE' });
-    } catch {
-        // ignore
+        if (activeUploadController) {
+            activeUploadController.abort();
+            activeUploadController = null;
+        }
+        if (state.sessionId) {
+            await apiFetch(`/session/${state.sessionId}`, { method: 'DELETE' });
+        } else if (state.clientKey) {
+            await apiFetch(`/session/client/${state.clientKey}`, { method: 'DELETE' });
+        }
+    } catch (error) {
+        toastr.error(`Could not cancel migration: ${error.message}`, 'Migration Assistant');
+        return;
     }
+    const clientKey = state.clientKey;
     state.sessionId = null;
     state.chats = [];
+    state.characters = [];
     state.clusters = [];
     state.planItems = [];
+    state.searchHits.clear();
+    state.searchDrafts.clear();
     state.profiles = [];
     state.profilesImported = false;
     state.importCompleted = false;
+    state.importPrepared = false;
+    state.importedClusterIds.clear();
     state.chatOverrides.clear();
     state.matchOverrides.clear();
+    state.clientKey = null;
+    state.step = 'upload';
+    localStorage.removeItem(CLIENT_KEY_STORAGE_KEY);
+    if (clientKey) {
+        try {
+            await deleteProgress(clientKey);
+        } catch (error) {
+            console.error('[migration-assistant] migration was cancelled but local progress could not be cleared:', error);
+            toastr.error('Migration was cancelled, but local progress storage could not be cleared.');
+        }
+    }
+    updateSessionButtons();
+    goToStep('upload');
     closeWizard();
 }
 
@@ -1268,6 +1595,7 @@ function bindWizardEvents(root) {
                 chat.skip = nextSkip;
             }
             renderChatList();
+            persistProgressSoon();
         }
     });
 
@@ -1296,10 +1624,12 @@ function bindWizardEvents(root) {
                 state.matchOverrides.set(clusterId, { clusterId, action: 'skip' });
             }
             renderMatchList();
+            persistProgressSoon();
         }
         if (btn.dataset.action === 'keep-match') {
             state.matchOverrides.set(clusterId, { clusterId, action: 'keep' });
             renderMatchList();
+            persistProgressSoon();
         }
         if (btn.dataset.action === 'pick-candidate') {
             const candidate = (cluster?.candidates || []).find((c) => c.key === btn.dataset.key);
@@ -1315,10 +1645,11 @@ function bindWizardEvents(root) {
                     },
                 });
                 renderMatchList();
+                persistProgressSoon();
             }
         }
     });
-
+    root.querySelector('#migasst_search_list')?.addEventListener('input', () => persistProgressSoon());
     root.querySelector('#migasst_search_list')?.addEventListener('click', async (e) => {
         const btn = e.target.closest('button[data-action]');
         const row = e.target.closest('[data-cluster-id]');
@@ -1337,6 +1668,7 @@ function bindWizardEvents(root) {
                 await saveManualCharacter(clusterId, row);
                 toastr.success('Manual character saved for this cluster');
                 renderSearchList();
+                void persistProgress();
             } catch (error) {
                 toastr.error(error.message || 'Could not save manual character.');
             }
@@ -1344,6 +1676,7 @@ function bindWizardEvents(root) {
         if (btn.dataset.action === 'skip-cluster') {
             state.matchOverrides.set(clusterId, { clusterId, action: 'skip' });
             renderSearchList();
+            persistProgressSoon();
         }
         if (btn.dataset.action === 'apply-search') {
             const hit = state.searchHits.get(btn.dataset.hitId || '');
@@ -1356,6 +1689,7 @@ function bindWizardEvents(root) {
                 character: hit,
             });
             toastr.success('Search result applied');
+            persistProgressSoon();
         }
     });
     root.querySelector('#migasst_search_list')?.addEventListener('change', (event) => {
@@ -1364,6 +1698,17 @@ function bindWizardEvents(root) {
         if (file && row) {
             void loadCardIntoSearchRow(file, row);
             event.target.value = '';
+        }
+    });
+    root.querySelector('#migasst_import_list')?.addEventListener('change', (event) => {
+        if (event.target.dataset.action !== 'toggle-include') {
+            return;
+        }
+        const row = event.target.closest('[data-cluster-id]');
+        const item = state.planItems.find((planItem) => planItem.clusterId === row?.dataset.clusterId);
+        if (item) {
+            item.include = event.target.checked;
+            persistProgressSoon();
         }
     });
     root.querySelector('#migasst_profile_list')?.addEventListener('input', (event) => {
@@ -1378,6 +1723,7 @@ function bindWizardEvents(root) {
         } else {
             profile.card[field] = event.target.value;
         }
+        persistProgressSoon();
     });
     root.querySelector('#migasst_profile_list')?.addEventListener('change', async (event) => {
         const field = event.target.dataset.field;
@@ -1395,6 +1741,7 @@ function bindWizardEvents(root) {
             if (next) {
                 setNextLabel(state.profilesImported ? 'Done' : state.profiles.some((item) => item.include && item.type) ? 'Import selected profiles' : 'Skip & finish');
             }
+            persistProgressSoon();
         } else if (field === 'include') {
             profile.include = event.target.checked;
             const next = root.querySelector('#migasst_next');
@@ -1404,6 +1751,7 @@ function bindWizardEvents(root) {
             if (next) {
                 setNextLabel(state.profilesImported ? 'Done' : state.profiles.some((item) => item.include && item.type) ? 'Import selected profiles' : 'Skip & finish');
             }
+            persistProgressSoon();
         } else if (field === 'image') {
             const imageFile = event.target.files?.[0];
             if (imageFile) {
@@ -1412,6 +1760,7 @@ function bindWizardEvents(root) {
                         throw new Error('Images must be smaller than 12 MB.');
                     }
                     profile.imageDataUrl = await readAsDataUrl(imageFile);
+                    await persistProgress();
                 } catch (error) {
                     toastr.error(error.message || 'Could not read profile image.');
                 }
@@ -1428,16 +1777,16 @@ async function mountUi() {
     }
 
     ensureAssets();
-    const settingsHtml = await fetch(`${EXTENSION_FOLDER}/settings.html`).then((r) => r.text());
-    const wizardHtml = await fetch(`${EXTENSION_FOLDER}/wizard.html`).then((r) => r.text());
-    const { DOMPurify } = SillyTavern.libs;
-    settingsHost.insertAdjacentHTML('beforeend', DOMPurify.sanitize(settingsHtml, {
-        FORBID_TAGS: ['link'],
-    }));
-    document.body.insertAdjacentHTML('beforeend', DOMPurify.sanitize(wizardHtml, {
-        ADD_ATTR: ['data-step', 'data-panel', 'data-i18n', 'for'],
-        FORBID_TAGS: ['link'],
-    }));
+    const { renderExtensionTemplateAsync } = getContext();
+    const templateFolder = `third-party/${MODULE_NAME}`;
+    if (!document.getElementById('migration_assistant_settings')) {
+        const settingsHtml = await renderExtensionTemplateAsync(templateFolder, 'settings');
+        $(settingsHost).append(settingsHtml);
+    }
+    if (!document.getElementById('migasst_wizard')) {
+        const wizardHtml = await renderExtensionTemplateAsync(templateFolder, 'wizard');
+        $('body').append(wizardHtml);
+    }
     const wizard = document.getElementById('migasst_wizard');
     if (wizard) {
         wizard.hidden = true;
@@ -1445,6 +1794,32 @@ async function mountUi() {
 
     const openBtn = document.getElementById('migasst_open_wizard');
     openBtn?.addEventListener('click', openWizard);
+    document.getElementById('migasst_resume_migration')?.addEventListener('click', openWizard);
+    document.getElementById('migasst_open_settings_page')?.addEventListener('click', () => {
+        settingsPageWindow = window.open(`${EXTENSION_FOLDER}/settings.html`, '_blank');
+        if (!settingsPageWindow) {
+            toastr.warning('Allow pop-ups to open the full settings page.');
+        }
+    });
+    window.addEventListener('message', (event) => {
+        if (event.origin !== window.location.origin
+            || event.source !== settingsPageWindow) {
+            return;
+        }
+        if (event.data?.type === 'migasst:begin-migration') {
+            settingsPageWindow = null;
+            openWizard();
+        } else if (event.data?.type === 'migasst:theme-change') {
+            applyTheme(event.data.theme);
+        }
+    });
+    window.addEventListener('pagehide', () => {
+        if (progressSaveTimer) {
+            clearTimeout(progressSaveTimer);
+            progressSaveTimer = null;
+        }
+        void persistProgress();
+    });
     document.getElementById('migasst_theme_toggle')?.addEventListener('change', (event) => {
         applyTheme(event.target.checked ? 'dark' : 'light');
     });
@@ -1457,6 +1832,10 @@ async function mountUi() {
         status.textContent = alive
             ? 'Server plugin connected.'
             : 'Server plugin not detected. Enable enableServerPlugins and install server-plugin/.';
+    }
+    if (alive) {
+        await restoreSession();
+        updateSessionButtons();
     }
 }
 

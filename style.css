@@ -1261,6 +1261,22 @@
     gap: 0.65rem;
 }
 
+.migration-assistant-settings .migasst-btn-ghost {
+    background: transparent !important;
+    color: var(--mig-dark) !important;
+    box-shadow: inset 0 0 0 1px var(--mig-line);
+}
+
+.migration-assistant-settings[data-theme="dark"] .migasst-btn-ghost {
+    color: #EBF2FA !important;
+    box-shadow: inset 0 0 0 1px #444444ba;
+}
+
+.migration-assistant-settings .migasst-resume-hint {
+    margin: 0.85rem 0 0;
+    font-size: 0.82rem;
+}
+
 .migration-assistant-settings .migasst-plugin-status {
     margin-top: 0.85rem;
     color: var(--mig-sage);
@@ -1271,6 +1287,11 @@
 .migration-assistant-settings .migasst-btn {
     min-height: 42px;
     border-radius: 10px !important;
+}
+
+.migration-assistant-settings .migasst-btn[hidden],
+#migasst_wizard .migasst-btn[hidden] {
+    display: none !important;
 }
 
 @media (max-width: 520px) {

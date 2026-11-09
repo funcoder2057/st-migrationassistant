@@ -15,40 +15,64 @@
                         Migrate CharacterAI exports into SillyTavern. Review chat sorting and character matches before anything is imported.
                     </p>
                     <div class="migasst-settings-actions">
+                        <button type="button" id="migasst_open_settings_page" class="migasst-btn migasst-btn-ghost"
+                            data-i18n="Open Settings Page">Open Settings Page</button>
+                        <button type="button" id="migasst_resume_migration" class="migasst-btn migasst-btn-ghost" hidden
+                            data-i18n="Resume Migration">Resume Migration</button>
                         <button type="button" id="migasst_open_wizard" class="migasst-btn migasst-btn-primary"
-                            data-i18n="Open Migration Wizard">Open Migration Wizard</button>
+                            data-i18n="Begin Migration">Begin Migration</button>
                         <label class="migasst-theme-toggle">
                             <span id="migasst_theme_label">Dark mode</span>
                             <input type="checkbox" id="migasst_theme_toggle" role="switch" aria-label="Dark mode" checked aria-checked="true">
                             <span class="migasst-theme-track" aria-hidden="true"></span>
                         </label>
                     </div>
+                    <p class="migasst-settings-copy migasst-resume-hint">
+                        Close the wizard to pause at a review checkpoint. Resume it here, or cancel to delete the saved progress.
+                    </p>
                     <div id="migasst_plugin_status" class="migasst-plugin-status" aria-live="polite"></div>
                 </div>
             </div>
 
-            <script>
-                (() => {
-                    const settings = document.getElementById('migration_assistant_settings');
-                    const toggle = document.getElementById('migasst_theme_toggle');
-                    const label = document.getElementById('migasst_theme_label');
-                    if (!settings || !toggle) {
-                        return;
-                    }
-
-                    const applyTheme = () => {
-                        const theme = toggle.checked ? 'dark' : 'light';
-                        settings.setAttribute('data-theme', theme);
-                        toggle.setAttribute('aria-checked', String(toggle.checked));
-                        if (label) {
-                            label.textContent = toggle.checked ? 'Dark mode' : 'Light mode';
-                        }
-                    };
-
-                    toggle.addEventListener('change', applyTheme);
-                    applyTheme();
-                })();
-            </script>
         </div>
     </div>
 </div>
+
+<script>
+    (() => {
+        const settings = document.getElementById('migration_assistant_settings');
+        const toggle = document.getElementById('migasst_theme_toggle');
+        const label = document.getElementById('migasst_theme_label');
+        const themeStorageKey = 'migasst-theme-v2';
+        if (!settings || !toggle) {
+            return;
+        }
+
+        const applyTheme = () => {
+            const theme = toggle.checked ? 'dark' : 'light';
+            settings.setAttribute('data-theme', theme);
+            toggle.setAttribute('aria-checked', String(toggle.checked));
+            localStorage.setItem(themeStorageKey, theme);
+            if (label) {
+                label.textContent = toggle.checked ? 'Dark mode' : 'Light mode';
+            }
+            window.opener?.postMessage({ type: 'migasst:theme-change', theme }, window.location.origin);
+        };
+
+        toggle.checked = localStorage.getItem(themeStorageKey) !== 'light';
+        toggle.addEventListener('change', applyTheme);
+        document.getElementById('migasst_open_settings_page')?.setAttribute('hidden', '');
+        document.getElementById('migasst_open_wizard')?.addEventListener('click', () => {
+            if (window.opener) {
+                window.opener.postMessage({ type: 'migasst:begin-migration' }, window.location.origin);
+                window.close();
+                return;
+            }
+            const status = document.getElementById('migasst_plugin_status');
+            if (status) {
+                status.textContent = 'Open this page from the Migration Assistant settings in SillyTavern to begin.';
+            }
+        });
+        applyTheme();
+    })();
+</script>

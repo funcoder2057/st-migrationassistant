@@ -47,7 +47,9 @@ Restart SillyTavern. The UI status line should read **Server plugin connected.**
 
 Character cards can also be added to unmatched clusters during Search. PNG card metadata is parsed as JSON and projected onto an explicit allowlist; arbitrary extensions and executable fields are not imported. Manual entries accept a greeting, description, definition, and optional image.
 
-The settings panel includes a persistent light/dark appearance switch.
+The SillyTavern settings panel provides **Open Settings Page**, **Begin Migration**, and a **Resume Migration** button when a session is active. Closing the wizard leaves the migration intact; progress and review choices are saved in the browser so the wizard can resume after navigation or reload while the server session is available. **Cancel Migration** explicitly removes the temporary session and saved progress.
+
+Work already running when the wizard is closed continues to its next user-input checkpoint. Chat and character imports record completed items so resuming does not intentionally repeat successful imports.
 
 ## API stub
 
@@ -60,7 +62,7 @@ The settings panel includes a persistent light/dark appearance switch.
 
 - Archives are validated against zip-slip, entry caps, and uncompressed size limits
 - Only expected JSON + image paths are extracted into an OS temp session directory
-- Sessions use 192-bit random IDs and expire after one hour
+- Sessions use 192-bit random IDs and a separate random browser key, and expire after 24 hours of inactivity
 - JSON override bodies are size-capped and field-sanitized before use
 - UI output is HTML-escaped; extension HTML is passed through DOMPurify
 - Plugin routes rely on SillyTavern’s own `/api` authentication — keep ST behind a trusted network or basic auth as usual
