@@ -1,3 +1,6 @@
+# NOTE: Automated character import does NOT work yet. I am waiting on API development.
+## I will update the plugin and state when this is added. Thanks for your patience.
+
 # Migration Assistant
 
 SillyTavern extension + server plugin that migrates **CharacterAI data exports** (`Username.zip` or `message.json`) into SillyTavern, with review checkpoints for chat sorting, character matching, and manual overrides.
