@@ -5,10 +5,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const SESSION_TTL_MS = 60 * 60 * 1000;
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_SESSIONS = 8;
 
-/** @type {Map<string, {dir: string, createdAt: number, data: object}>} */
+/** @type {Map<string, {dir: string, createdAt: number, clientKey: string|null, data: object}>} */
 const sessions = new Map();
 
 function createSessionId() {
@@ -27,8 +27,18 @@ function purgeExpired() {
 /**
  * @returns {{id: string, dir: string}}
  */
-function createSession() {
+function createSession(clientKey = null) {
     purgeExpired();
+    if (clientKey && !/^[a-f0-9]{48}$/.test(clientKey)) {
+        clientKey = null;
+    }
+    if (clientKey) {
+        for (const [existingId, session] of sessions.entries()) {
+            if (session.clientKey === clientKey) {
+                destroySession(existingId);
+            }
+        }
+    }
     while (sessions.size >= MAX_SESSIONS) {
         const oldest = [...sessions.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt)[0];
         if (oldest) {
@@ -40,7 +50,7 @@ function createSession() {
 
     const id = createSessionId();
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), `st-migasst-${id.slice(0, 8)}-`));
-    sessions.set(id, { dir, createdAt: Date.now(), data: {} });
+    sessions.set(id, { dir, createdAt: Date.now(), clientKey, data: {} });
     return { id, dir };
 }
 
@@ -58,6 +68,22 @@ function getSession(id) {
     }
     session.createdAt = Date.now();
     return session;
+}
+
+/**
+ * @param {string} clientKey
+ */
+function getSessionByClientKey(clientKey) {
+    if (!clientKey || !/^[a-f0-9]{48}$/.test(clientKey)) {
+        return null;
+    }
+    purgeExpired();
+    const entry = [...sessions.entries()].find(([, session]) => session.clientKey === clientKey);
+    if (!entry) {
+        return null;
+    }
+    entry[1].createdAt = Date.now();
+    return { id: entry[0], session: entry[1] };
 }
 
 /**
@@ -85,6 +111,7 @@ function destroyAll() {
 module.exports = {
     createSession,
     getSession,
+    getSessionByClientKey,
     destroySession,
     destroyAll,
 };

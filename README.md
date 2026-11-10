@@ -6,7 +6,7 @@ SillyTavern extension + server plugin that migrates **CharacterAI data exports**
 
 | Path | Role |
 |------|------|
-| `manifest.json`, `index.js`, `style.css`, `*.html` | UI extension (wizard + settings entry) |
+| `manifest.json`, `index.js`, `style.css`, `wizard.html` | UI extension (native Extensions panel + wizard) |
 | `api.js` | Character search facade (calls left blank / TBC) |
 | `server-plugin/` | Express plugin: zip extract, parse, match, import payloads |
 
@@ -35,7 +35,9 @@ SillyTavern extension + server plugin that migrates **CharacterAI data exports**
 
 Character cards can also be added to unmatched clusters during Search. PNG card metadata is parsed as JSON and projected onto an explicit allowlist; arbitrary extensions and executable fields are not imported. Manual entries accept a greeting, description, definition, and optional image.
 
-The settings panel includes a persistent light/dark appearance switch.
+The SillyTavern **Extensions** panel provides a persistent light/dark switch, **Begin Migration**, and a **Resume Migration** button when a session is active. Begin and Resume open a full-size SillyTavern popup with the wizard ready at the saved step. Closing the wizard leaves the migration intact; progress and review choices are saved in the browser so the wizard can resume after navigation or reload while the server session is available. If SillyTavern restarts and loses its in-memory session, the wizard returns to Upload and asks you to upload the export again. **Cancel Migration** explicitly removes the temporary session and saved progress.
+
+Work already running when the wizard is closed continues to its next user-input checkpoint. Actions lasting over five seconds show a spinner and a status message; if work continues, the message changes every five minutes. Characters and their chats are saved through SillyTavern's own import and chat-save APIs; completed items are recorded so resuming does not intentionally repeat successful imports.
 
 ## API stub
 
@@ -48,7 +50,7 @@ The settings panel includes a persistent light/dark appearance switch.
 
 - Archives are validated against zip-slip, entry caps, and uncompressed size limits
 - Only expected JSON + image paths are extracted into an OS temp session directory
-- Sessions use 192-bit random IDs and expire after one hour
+- Sessions use 192-bit random IDs and a separate random browser key, and expire after 24 hours of inactivity
 - JSON override bodies are size-capped and field-sanitized before use
 - UI output is HTML-escaped; extension HTML is passed through DOMPurify
 - Plugin routes rely on SillyTavern’s own `/api` authentication — keep ST behind a trusted network or basic auth as usual

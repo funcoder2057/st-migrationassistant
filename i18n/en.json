@@ -1,6 +1,7 @@
 {
   "Migration Assistant": "Migration Assistant",
-  "Open Migration Wizard": "Open Migration Wizard",
+  "Begin Migration": "Begin Migration",
+  "Resume Migration": "Resume Migration",
   "CharacterAI → SillyTavern": "CharacterAI → SillyTavern",
   "Upload": "Upload",
   "Chats": "Chats",
@@ -14,7 +15,7 @@
   "Complete import": "Complete import",
   "Back": "Back",
   "Continue": "Continue",
-  "Discard session": "Discard session",
+  "Cancel Migration": "Cancel Migration",
   "Close": "Close",
   "Username.zip": "Export ZIP or message.json",
   "Click or drag a CharacterAI data export here": "Drop an export archive or a single message JSON file",

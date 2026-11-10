@@ -1,14 +1,21 @@
 import { searchCharactersByGreeting, searchCharactersByQuery } from './api.js';
 import { getUserAvatars, initPersona } from '../../../../scripts/personas.js';
-import { getRequestHeaders } from '../../../../script.js';
+import { getRequestHeaders, saveSettingsDebounced } from '../../../../script.js';
+import { extension_settings } from '../../../extensions.js';
 
 const MODULE_NAME = 'st-migrationasst';
 const PLUGIN_ID = 'migration-assistant';
+const RUNTIME_KEY = '__stMigrationAssistantMounted';
 const PLUGIN_BASE = `/api/plugins/${PLUGIN_ID}`;
-const EXTENSION_FOLDER = `scripts/extensions/third-party/${MODULE_NAME}`;
+const WIZARD_TEMPLATE_URL = new URL('./wizard.html', import.meta.url).href;
+const STYLESHEET_URL = new URL('./style.css?v=7', import.meta.url).href;
 
 const STEPS = ['upload', 'chats', 'match', 'search', 'import', 'profiles'];
 const THEME_STORAGE_KEY = 'migasst-theme-v2';
+const CLIENT_KEY_STORAGE_KEY = 'migasst-client-key-v1';
+const PROGRESS_DB_NAME = 'migasst-progress-v1';
+const PROGRESS_STORE_NAME = 'workflows';
+const BEGIN_MIGRATION_PARAM = 'migasst_begin_migration';
 
 const STEP_META = {
     upload: { title: 'Drop your export', next: 'Continue' },
@@ -33,10 +40,32 @@ const state = {
     openChatId: null,
     /** @type {Map<string, object>} */
     searchHits: new Map(),
+    searchDrafts: new Map(),
     profiles: [],
     profilesImported: false,
     importCompleted: false,
+    importPrepared: false,
+    importedClusterIds: new Set(),
+    importedCharacterFiles: new Map(),
+    clientKey: null,
 };
+
+let progressDbPromise = null;
+let progressWriteQueue = Promise.resolve();
+let serverStepWriteQueue = Promise.resolve();
+let progressSaveTimer = null;
+let activeUploadController = null;
+let longTaskCount = 0;
+let longTaskShowTimer = null;
+let longTaskRotationTimer = null;
+let longTaskMessageIndex = 0;
+
+const LONG_TASK_MESSAGES = [
+    'Still working. Your migration is in progress.',
+    'You talk a lot, give us a few minutes to read it all.',
+    "That's a lot of words, let us sort through it, grab a coffee.",
+    'This migration has more plot than a season finale. Almost there.',
+];
 
 function getContext() {
     return SillyTavern.getContext();
@@ -219,28 +248,372 @@ async function readStreamLimited(stream, maxBytes) {
 
 async function apiFetch(path, options = {}) {
     const opts = { ...options };
-    opts.headers = { ...(options.headers || {}) };
+    const isFormData = opts.body instanceof FormData;
+    opts.headers = {
+        ...getRequestHeaders({ omitContentType: isFormData || !opts.body }),
+        ...(options.headers || {}),
+    };
+    const method = String(opts.method || 'GET').toUpperCase();
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+        const tokenResponse = await fetch('/csrf-token', { credentials: 'same-origin' });
+        if (!tokenResponse.ok) {
+            throw new Error(`Could not refresh SillyTavern's CSRF token (HTTP ${tokenResponse.status}).`);
+        }
+        const tokenData = await tokenResponse.json();
+        if (typeof tokenData?.token !== 'string' || !tokenData.token) {
+            throw new Error('SillyTavern returned an invalid CSRF token.');
+        }
+        opts.headers['X-CSRF-Token'] = tokenData.token;
+    }
     if (opts.body && !(opts.body instanceof FormData)) {
         opts.headers['Content-Type'] = 'application/json';
         opts.body = JSON.stringify(opts.body);
     }
+    opts.credentials = 'same-origin';
     const res = await fetch(`${PLUGIN_BASE}${path}`, opts);
     if (!res.ok) {
         let message = `Request failed (${res.status})`;
+        let code = null;
         try {
             const data = await res.json();
             if (data?.error) {
                 message = data.error;
+                if (data.error === 'Session not found or expired.') {
+                    code = 'SESSION_EXPIRED';
+                }
             }
         } catch {
             // ignore
         }
-        throw new Error(message);
+        const error = new Error(message);
+        error.status = res.status;
+        error.code = code;
+        throw error;
     }
     if (res.status === 204) {
         return null;
     }
     return res.json();
+}
+
+async function getFreshRequestHeaders(options = {}) {
+    const tokenResponse = await fetch('/csrf-token', { credentials: 'same-origin' });
+    if (!tokenResponse.ok) {
+        throw new Error(`Could not refresh SillyTavern's CSRF token (HTTP ${tokenResponse.status}).`);
+    }
+    const tokenData = await tokenResponse.json();
+    if (typeof tokenData?.token !== 'string' || !tokenData.token) {
+        throw new Error('SillyTavern returned an invalid CSRF token.');
+    }
+    return {
+        ...getRequestHeaders(options),
+        'X-CSRF-Token': tokenData.token,
+    };
+}
+
+function getClientKey() {
+    let key = localStorage.getItem(CLIENT_KEY_STORAGE_KEY);
+    if (!key) {
+        const bytes = crypto.getRandomValues(new Uint8Array(24));
+        key = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+        localStorage.setItem(CLIENT_KEY_STORAGE_KEY, key);
+    }
+    return key;
+}
+
+function openProgressDb() {
+    if (!globalThis.indexedDB) {
+        return Promise.reject(new Error('This browser does not support resumable migration storage.'));
+    }
+    if (!progressDbPromise) {
+        progressDbPromise = new Promise((resolve, reject) => {
+            const request = indexedDB.open(PROGRESS_DB_NAME, 1);
+            request.onupgradeneeded = () => {
+                if (!request.result.objectStoreNames.contains(PROGRESS_STORE_NAME)) {
+                    request.result.createObjectStore(PROGRESS_STORE_NAME);
+                }
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error || new Error('Could not open migration progress storage.'));
+        });
+    }
+    return progressDbPromise;
+}
+
+function makeProgressSnapshot() {
+    return {
+        sessionId: state.sessionId,
+        step: state.step,
+        chats: state.chats,
+        characters: state.characters,
+        clusters: state.clusters,
+        planItems: state.planItems,
+        chatOverrides: [...state.chatOverrides.entries()],
+        matchOverrides: [...state.matchOverrides.entries()],
+        searchHits: [...state.searchHits.entries()],
+        searchDrafts: [...state.searchDrafts.entries()],
+        profiles: state.profiles,
+        profilesImported: state.profilesImported,
+        importCompleted: state.importCompleted,
+        importPrepared: state.importPrepared,
+        importedClusterIds: [...state.importedClusterIds],
+        importedCharacterFiles: [...state.importedCharacterFiles.entries()],
+    };
+}
+
+function persistProgressSoon() {
+    if (progressSaveTimer) {
+        clearTimeout(progressSaveTimer);
+    }
+    progressSaveTimer = setTimeout(() => {
+        progressSaveTimer = null;
+        void persistProgress();
+    }, 250);
+}
+
+function persistProgress() {
+    if (!state.clientKey) {
+        return Promise.resolve();
+    }
+    const clientKey = state.clientKey;
+    document.querySelectorAll('#migasst_search_list [data-cluster-id]').forEach((row) => {
+        const fields = {};
+        row.querySelectorAll('[data-field]').forEach((input) => {
+            if (input.type !== 'file') {
+                fields[input.dataset.field] = input.value;
+            }
+        });
+        state.searchDrafts.set(row.dataset.clusterId, {
+            fields,
+            cardImage: row.dataset.cardImage || null,
+        });
+    });
+    const snapshot = makeProgressSnapshot();
+    progressWriteQueue = progressWriteQueue.then(async () => {
+        const db = await openProgressDb();
+        await new Promise((resolve, reject) => {
+            const transaction = db.transaction(PROGRESS_STORE_NAME, 'readwrite');
+            transaction.objectStore(PROGRESS_STORE_NAME).put(snapshot, clientKey);
+            transaction.oncomplete = resolve;
+            transaction.onerror = () => reject(transaction.error || new Error('Could not save migration progress.'));
+            transaction.onabort = () => reject(transaction.error || new Error('Migration progress save was cancelled.'));
+        });
+    }).catch((error) => {
+        console.error('[migration-assistant] could not save migration progress:', error);
+        const status = document.getElementById('migasst_plugin_status');
+        if (status) {
+            status.textContent = `Migration progress could not be saved: ${error.message}`;
+        }
+    });
+    return progressWriteQueue;
+}
+
+async function loadProgress(clientKey) {
+    const db = await openProgressDb();
+    return new Promise((resolve, reject) => {
+        const request = db.transaction(PROGRESS_STORE_NAME, 'readonly')
+            .objectStore(PROGRESS_STORE_NAME)
+            .get(clientKey);
+        request.onsuccess = () => resolve(request.result || null);
+        request.onerror = () => reject(request.error || new Error('Could not read saved migration progress.'));
+    });
+}
+
+async function deleteProgress(clientKey) {
+    await progressWriteQueue;
+    const db = await openProgressDb();
+    await new Promise((resolve, reject) => {
+        const transaction = db.transaction(PROGRESS_STORE_NAME, 'readwrite');
+        transaction.objectStore(PROGRESS_STORE_NAME).delete(clientKey);
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error || new Error('Could not clear migration progress.'));
+    });
+}
+
+function updateSessionButtons() {
+    const resume = document.getElementById('migasst_resume_migration');
+    if (resume) {
+        resume.hidden = !state.sessionId;
+    }
+}
+
+async function recoverExpiredSession(error) {
+    if (error?.code !== 'SESSION_EXPIRED' || !state.sessionId) {
+        return false;
+    }
+
+    const clientKey = state.clientKey || localStorage.getItem(CLIENT_KEY_STORAGE_KEY);
+    state.clientKey = clientKey;
+    state.sessionId = null;
+    state.chats = [];
+    state.characters = [];
+    state.clusters = [];
+    state.planItems = [];
+    state.chatOverrides.clear();
+    state.matchOverrides.clear();
+    state.searchHits.clear();
+    state.searchDrafts.clear();
+    state.profiles = [];
+    state.profilesImported = false;
+    state.importCompleted = false;
+    state.importPrepared = false;
+    state.importedClusterIds.clear();
+    state.importedCharacterFiles.clear();
+    state.stats = null;
+    state.openChatId = null;
+    state.step = 'upload';
+
+    if (clientKey) {
+        try {
+            await deleteProgress(clientKey);
+        } catch (storageError) {
+            console.error('[migration-assistant] could not clear expired migration progress:', storageError);
+            toastr.error('The old migration session expired, and its saved browser progress could not be cleared.');
+        }
+    }
+
+    renderChatList();
+    renderMatchList();
+    renderSearchList();
+    renderImportList();
+    renderProfileList();
+    updateSessionButtons();
+    setStatus(
+        document.getElementById('migasst_upload_status'),
+        'This migration session is no longer available, often because SillyTavern was restarted. Re-upload your export to continue.',
+        true,
+    );
+    goToStep('upload');
+    return true;
+}
+
+function saveServerStep(sessionId, step) {
+    serverStepWriteQueue = serverStepWriteQueue.then(() => apiFetch(`/session/${sessionId}/progress`, {
+        method: 'POST',
+        body: { step },
+    })).catch((error) => {
+        if (error?.code === 'SESSION_EXPIRED') {
+            void recoverExpiredSession(error);
+        } else {
+            console.error('[migration-assistant] could not save migration step:', error);
+        }
+    });
+}
+
+function restoreSnapshot(snapshot, saved) {
+    state.sessionId = snapshot.sessionId;
+    state.clientKey = getClientKey();
+    state.chats = snapshot.chats || [];
+    state.characters = snapshot.characters || [];
+    state.clusters = snapshot.clusters || [];
+    state.planItems = snapshot.planItems || [];
+    state.stats = snapshot.stats || null;
+    state.chatOverrides = new Map(saved?.chatOverrides || snapshot.chatOverrides?.map((item) => [item.chatId, item]) || []);
+    state.matchOverrides = new Map(saved?.matchOverrides || snapshot.matchOverrides?.map((item) => [item.clusterId, item]) || []);
+    state.searchHits = new Map(saved?.searchHits || []);
+    state.searchDrafts = new Map(saved?.searchDrafts || []);
+    state.profiles = saved?.profiles || [];
+    state.profilesImported = !!saved?.profilesImported;
+    state.importCompleted = !!saved?.importCompleted;
+    state.importPrepared = !!(snapshot.importPrepared || saved?.importPrepared);
+    state.importedClusterIds = new Set(saved?.importedClusterIds || []);
+    state.importedCharacterFiles = new Map(saved?.importedCharacterFiles || []);
+    const savedStep = STEPS.includes(snapshot.step)
+        ? snapshot.step
+        : saved?.sessionId === snapshot.sessionId && STEPS.includes(saved.step)
+            ? saved.step
+            : 'upload';
+    state.step = savedStep === 'profiles' && !state.importCompleted && state.importPrepared
+        ? 'import'
+        : savedStep;
+    renderChatList();
+    renderMatchList();
+    renderSearchList();
+    renderImportList();
+    renderProfileList();
+    const matchStats = document.getElementById('migasst_match_stats');
+    if (matchStats && snapshot.matchSummary) {
+        matchStats.textContent = `${snapshot.matchSummary.total} clusters · ${snapshot.matchSummary.matchedExport} export-matched · ${snapshot.matchSummary.needsSearch} need search`;
+    }
+    const importStats = document.getElementById('migasst_import_stats');
+    if (importStats && snapshot.planSummary) {
+        importStats.textContent = `${snapshot.planSummary.characters} characters · ${snapshot.planSummary.chats} chats · ${snapshot.planSummary.messages} messages`;
+    }
+    if (snapshot.importPrepared && !state.importCompleted) {
+        setStatus(document.getElementById('migasst_import_result'), 'Import was interrupted. Resume to continue without repeating completed imports.');
+    }
+    for (const [clusterId, draft] of state.searchDrafts) {
+        const row = document.querySelector(`#migasst_search_list [data-cluster-id="${CSS.escape(clusterId)}"]`);
+        if (!row) {
+            continue;
+        }
+        for (const [field, value] of Object.entries(draft.fields || {})) {
+            const input = row.querySelector(`[data-field="${field}"]`);
+            if (input && input.type !== 'file') {
+                input.value = value;
+            }
+        }
+        if (draft.cardImage) {
+            row.dataset.cardImage = draft.cardImage;
+        }
+    }
+    updateSessionButtons();
+    goToStep(state.step);
+    persistProgress();
+}
+
+async function restoreSession() {
+    const clientKey = localStorage.getItem(CLIENT_KEY_STORAGE_KEY);
+    if (!clientKey || !/^[a-f0-9]{48}$/.test(clientKey)) {
+        return false;
+    }
+    state.clientKey = clientKey;
+    let saved = null;
+    try {
+        saved = await loadProgress(clientKey);
+        let snapshot;
+        if (saved?.sessionId) {
+            try {
+                snapshot = await apiFetch(`/session/${saved.sessionId}/state`);
+            } catch (error) {
+                if (!/session not found|expired/i.test(error.message)) {
+                    throw error;
+                }
+            }
+        }
+        if (!snapshot) {
+            snapshot = await apiFetch(`/session/restore/${clientKey}`);
+        }
+        restoreSnapshot(snapshot, saved);
+        const status = document.getElementById('migasst_plugin_status');
+        if (status) {
+            status.textContent = 'An unfinished migration is ready to resume.';
+        }
+        return true;
+    } catch (error) {
+        if (saved?.sessionId && /no active migration|not ready|session not found|expired/i.test(error.message)) {
+            try {
+                await deleteProgress(clientKey);
+            } catch (storageError) {
+                console.error('[migration-assistant] could not clear expired migration progress:', storageError);
+                toastr.error('The old migration session expired, and its saved browser progress could not be cleared.');
+            }
+            setStatus(
+                document.getElementById('migasst_upload_status'),
+                'This migration session is no longer available, often because SillyTavern was restarted. Re-upload your export to continue.',
+                true,
+            );
+            return false;
+        }
+        if (!/no active migration|not ready|session not found|expired/i.test(error.message)) {
+            console.error('[migration-assistant] could not restore migration:', error);
+            const status = document.getElementById('migasst_plugin_status');
+            if (status) {
+                status.textContent = `Could not resume migration: ${error.message}`;
+            }
+        }
+        return false;
+    }
 }
 
 async function probePlugin() {
@@ -261,6 +634,49 @@ function setStatus(el, text, isError = false) {
     el.classList.toggle('is-error', !!isError);
 }
 
+function updateLongTaskMessage() {
+    const message = document.getElementById('migasst_long_task_message');
+    if (message) {
+        message.textContent = LONG_TASK_MESSAGES[longTaskMessageIndex];
+    }
+}
+
+function showLongTask() {
+    const indicator = document.getElementById('migasst_long_task');
+    if (!indicator || longTaskCount === 0) {
+        return;
+    }
+    longTaskMessageIndex = 0;
+    updateLongTaskMessage();
+    indicator.hidden = false;
+    longTaskRotationTimer = setInterval(() => {
+        longTaskMessageIndex = (longTaskMessageIndex + 1) % LONG_TASK_MESSAGES.length;
+        updateLongTaskMessage();
+    }, 5 * 60 * 1000);
+}
+
+async function withLongTask(operation) {
+    longTaskCount += 1;
+    if (longTaskCount === 1) {
+        longTaskShowTimer = setTimeout(showLongTask, 5000);
+    }
+    try {
+        return await operation();
+    } finally {
+        longTaskCount = Math.max(0, longTaskCount - 1);
+        if (longTaskCount === 0) {
+            clearTimeout(longTaskShowTimer);
+            clearInterval(longTaskRotationTimer);
+            longTaskShowTimer = null;
+            longTaskRotationTimer = null;
+            const indicator = document.getElementById('migasst_long_task');
+            if (indicator) {
+                indicator.hidden = true;
+            }
+        }
+    }
+}
+
 function ensureAssets() {
     if (!document.getElementById('migasst_font_link')) {
         const preconnect1 = document.createElement('link');
@@ -276,17 +692,16 @@ function ensureAssets() {
         font.href = 'https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700&display=swap';
         document.head.append(preconnect1, preconnect2, font);
     }
-    const hasStylesheet = Array.from(document.querySelectorAll('link[rel="stylesheet"]')).some((stylesheet) => {
-        if (!stylesheet.href) {
-            return false;
-        }
-        return new URL(stylesheet.href).pathname.endsWith(`/${MODULE_NAME}/style.css`);
-    });
-    if (!hasStylesheet && !document.getElementById('migasst_style_link')) {
+    const stylesheetPath = new URL(STYLESHEET_URL).pathname;
+    const stylesheet = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+        .find((link) => link.href && new URL(link.href).pathname === stylesheetPath);
+    if (stylesheet) {
+        stylesheet.href = STYLESHEET_URL;
+    } else if (!document.getElementById('migasst_style_link')) {
         const link = document.createElement('link');
         link.id = 'migasst_style_link';
         link.rel = 'stylesheet';
-        link.href = `${EXTENSION_FOLDER}/style.css?v=4`;
+        link.href = STYLESHEET_URL;
         document.head.appendChild(link);
     }
 }
@@ -305,10 +720,17 @@ function applyTheme(theme) {
         label.textContent = selected === 'dark' ? 'Dark mode' : 'Light mode';
     }
     localStorage.setItem(THEME_STORAGE_KEY, selected);
+    extension_settings[MODULE_NAME] = extension_settings[MODULE_NAME] || {};
+    extension_settings[MODULE_NAME].theme = selected;
+    saveSettingsDebounced();
 }
 
 function initializeTheme() {
-    applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || 'dark');
+    extension_settings[MODULE_NAME] = extension_settings[MODULE_NAME] || {};
+    const savedTheme = extension_settings[MODULE_NAME].theme
+        || localStorage.getItem(THEME_STORAGE_KEY)
+        || 'dark';
+    applyTheme(savedTheme);
 }
 
 function openWizard() {
@@ -329,6 +751,26 @@ function closeWizard() {
         wizard.hidden = true;
     }
     document.body.style.overflow = '';
+    void persistProgress();
+}
+
+function openMigrationWindow() {
+    const target = new URL(window.location.href);
+    target.searchParams.set(BEGIN_MIGRATION_PARAM, '1');
+    const migrationWindow = window.open(target.toString(), '_blank', 'popup,width=1280,height=900');
+    if (!migrationWindow) {
+        toastr.warning('Allow pop-ups to open the Migration Assistant in a new window.');
+    }
+}
+
+function consumeBeginMigrationRequest() {
+    const currentUrl = new URL(window.location.href);
+    if (currentUrl.searchParams.get(BEGIN_MIGRATION_PARAM) !== '1') {
+        return false;
+    }
+    currentUrl.searchParams.delete(BEGIN_MIGRATION_PARAM);
+    history.replaceState(history.state, '', currentUrl);
+    return true;
 }
 
 function setNextLabel(label) {
@@ -387,7 +829,7 @@ function goToStep(step) {
         back.disabled = step === 'upload';
     }
     if (danger) {
-        danger.hidden = !state.sessionId;
+        danger.hidden = !(state.sessionId || state.clientKey);
     }
     if (next) {
         next.disabled = step === 'upload' ? !state.sessionId : false;
@@ -398,9 +840,18 @@ function goToStep(step) {
                 : STEP_META[step]?.next || 'Continue';
         setNextLabel(label);
     }
+    updateSessionButtons();
+    void persistProgress();
+    if (state.sessionId) {
+        saveServerStep(state.sessionId, step);
+    }
 }
 
-async function handleUpload(file) {
+function handleUpload(file) {
+    return withLongTask(() => performUpload(file));
+}
+
+async function performUpload(file) {
     const status = document.getElementById('migasst_upload_status');
     if (!file) {
         return;
@@ -414,23 +865,44 @@ async function handleUpload(file) {
     }
     setStatus(status, isZip ? 'Uploading and parsing export…' : 'Uploading and parsing messages…');
     const form = new FormData();
-    form.append('export', file, file.name);
+    state.clientKey = getClientKey();
+    form.append('clientKey', state.clientKey);
+    form.append('avatar', file, file.name);
+    const cancelButton = document.getElementById('migasst_danger');
+    if (cancelButton) {
+        cancelButton.hidden = false;
+    }
+    const controller = new AbortController();
+    activeUploadController = controller;
+    void persistProgress();
     try {
-        const data = await apiFetch('/upload', { method: 'POST', body: form });
+        const data = await apiFetch('/upload', { method: 'POST', body: form, signal: controller.signal });
         state.sessionId = data.sessionId;
         state.chats = data.chats || [];
         state.characters = data.characters || [];
         state.stats = data.stats || null;
         state.chatOverrides = new Map();
         state.matchOverrides = new Map();
+        state.importCompleted = false;
+        state.importPrepared = false;
+        state.importedClusterIds.clear();
+        state.importedCharacterFiles.clear();
         const characterLabel = data.stats?.characterCount
             ? ` · ${data.stats.characterCount} export characters`
             : ' · no character data (you can add cards later)';
         setStatus(status, `Parsed ${data.stats?.chatCount ?? 0} chats · ${data.stats?.messageCount ?? 0} messages${characterLabel}.`);
         renderChatList();
+        updateSessionButtons();
+        void persistProgress();
         goToStep('chats');
     } catch (error) {
-        setStatus(status, error.message || 'Upload failed.', true);
+        if (error.name !== 'AbortError') {
+            setStatus(status, error.message || 'Upload failed.', true);
+        }
+    } finally {
+        if (activeUploadController === controller) {
+            activeUploadController = null;
+        }
     }
 }
 
@@ -505,6 +977,9 @@ async function openChatDrawer(chatId) {
             </div>`;
         }).join('');
     } catch (error) {
+        if (await recoverExpiredSession(error)) {
+            return;
+        }
         msgList.innerHTML = `<p class="migasst-status is-error">${escapeHtml(error.message)}</p>`;
     }
 }
@@ -528,6 +1003,7 @@ function flipMessageRole(index) {
     }
     state.chatOverrides.set(state.openChatId, { ...current, chatId: state.openChatId, roles });
     openChatDrawer(state.openChatId);
+    persistProgressSoon();
 }
 
 async function confirmChatsAndMatch() {
@@ -607,7 +1083,17 @@ function renderSearchList() {
         list.innerHTML = '<div class="migasst-status">No clusters need external search. Continue to import.</div>';
         return;
     }
-    list.innerHTML = needing.map((cluster, i) => `
+    list.innerHTML = needing.map((cluster, i) => {
+        const results = [...state.searchHits.entries()]
+            .filter(([hitId]) => hitId.startsWith(`${cluster.clusterId}:`))
+            .map(([hitId, hit]) => `
+                <div class="migasst-msg">
+                    <div class="migasst-msg-top"><span>${escapeHtml(hit.name)}</span>
+                    <button type="button" class="migasst-btn migasst-btn-primary migasst-btn-small" data-action="apply-search" data-hit-id="${escapeHtml(hitId)}">Use</button></div>
+                    <div class="migasst-msg-body">${escapeHtml((hit.greeting || '').slice(0, 240))}</div>
+                </div>`)
+            .join('');
+        return `
         <article class="migasst-row is-warn" data-cluster-id="${escapeHtml(cluster.clusterId)}" style="animation-delay:${Math.min(i, 12) * 25}ms">
             <div>
                 <p class="migasst-row-title">${escapeHtml(cluster.match?.name || 'Needs character')}</p>
@@ -626,7 +1112,7 @@ function renderSearchList() {
                     </label>
                     <input class="migasst-input" data-field="query" placeholder="Search query (API stub)">
                 </div>
-                <div class="migasst-search-results" data-results></div>
+                <div class="migasst-search-results" data-results>${results}</div>
             </div>
             <div class="migasst-row-actions">
                 <button type="button" class="migasst-btn migasst-btn-primary migasst-btn-small" data-action="search-greeting">Search greeting</button>
@@ -635,7 +1121,8 @@ function renderSearchList() {
                 <button type="button" class="migasst-btn migasst-btn-danger migasst-btn-small" data-action="skip-cluster">Skip</button>
             </div>
         </article>
-    `).join('');
+    `;
+    }).join('');
 }
 
 async function runClusterSearch(clusterId, mode) {
@@ -682,6 +1169,7 @@ async function runClusterSearch(clusterId, mode) {
             resultsEl.innerHTML = `<p class="migasst-status is-error">${escapeHtml(error.message)}</p>`;
         }
     }
+    persistProgressSoon();
 }
 
 async function saveManualCharacter(clusterId, row) {
@@ -710,9 +1198,14 @@ async function saveManualCharacter(clusterId, row) {
             imageUrl,
         },
     });
+    await persistProgress();
 }
 
-async function loadCardIntoSearchRow(file, row) {
+function loadCardIntoSearchRow(file, row) {
+    return withLongTask(() => processCardIntoSearchRow(file, row));
+}
+
+async function processCardIntoSearchRow(file, row) {
     try {
         const card = await decodeCardMetadata(file);
         const isPng = file.type === 'image/png' || file.name.toLowerCase().endsWith('.png');
@@ -728,6 +1221,7 @@ async function loadCardIntoSearchRow(file, row) {
         row.dataset.cardImage = hasSmallImage
             ? await readAsDataUrl(file)
             : '';
+        persistProgressSoon();
         toastr.success(`Loaded character card: ${card.name}`);
         if (isPng && !hasSmallImage) {
             toastr.info('Card details loaded; the PNG is too large to attach as an avatar. Choose a smaller image if needed.');
@@ -819,27 +1313,43 @@ async function runImport() {
             method: 'POST',
             body: { excludeClusterIds },
         });
-        state.importCompleted = true;
+        state.importPrepared = true;
+        await persistProgress();
 
-        // Best-effort import into SillyTavern via public character import endpoint when available.
         let imported = 0;
         const failures = [];
-        const { Popup } = getContext();
         for (const payload of data.payloads || []) {
+            if (state.importedClusterIds.has(payload.clusterId)) {
+                continue;
+            }
             try {
-                await importCharacterPayload(payload);
+                let avatarUrl = state.importedCharacterFiles.get(payload.clusterId);
+                if (!avatarUrl) {
+                    avatarUrl = await importCharacterPayload(payload);
+                    state.importedCharacterFiles.set(payload.clusterId, avatarUrl);
+                    await persistProgress();
+                }
+                await importChats(payload, avatarUrl);
                 imported += 1;
+                state.importedClusterIds.add(payload.clusterId);
+                await persistProgress();
             } catch (error) {
                 failures.push(`${payload.character?.name || 'Character'}: ${error.message}`);
             }
         }
 
         setStatus(result, `Prepared ${data.count} package(s). Imported ${imported}${failures.length ? `; ${failures.length} failed: ${failures.join('; ')}` : ''}.`);
-        if (Popup?.show?.text) {
-            await Popup.show.text('Migration Assistant', `Prepared ${data.count} package(s). Imported ${imported}.`);
+        if (failures.length) {
+            await persistProgress();
+            return;
         }
+        state.importCompleted = true;
+        await persistProgress();
         goToStep('profiles');
     } catch (error) {
+        if (await recoverExpiredSession(error)) {
+            return;
+        }
         setStatus(result, error.message || 'Import failed.', true);
     }
 }
@@ -859,7 +1369,7 @@ async function importCharacterPayload(payload) {
     form.append('file_type', fileType);
     const res = await fetch('/api/characters/import', {
         method: 'POST',
-        headers: getRequestHeaders({ omitContentType: true }),
+        headers: await getFreshRequestHeaders({ omitContentType: true }),
         body: form,
         credentials: 'same-origin',
     });
@@ -869,6 +1379,41 @@ async function importCharacterPayload(payload) {
     const response = await res.json();
     if (response.error) {
         throw new Error('SillyTavern could not import this character card.');
+    }
+    if (typeof response.file_name !== 'string' || !response.file_name) {
+        throw new Error('SillyTavern did not return the imported character filename.');
+    }
+    return response.file_name;
+}
+
+async function importChats(payload, avatarUrl) {
+    const chats = Array.isArray(payload.chats) ? payload.chats : [];
+    for (const chat of chats) {
+        const chatData = [
+            {
+                chat_metadata: {},
+                user_name: getContext().name1 || 'User',
+                character_name: payload.character.name,
+            },
+            ...chat.messages,
+        ];
+        const response = await fetch('/api/chats/save', {
+            method: 'POST',
+            headers: await getFreshRequestHeaders(),
+            body: JSON.stringify({
+                avatar_url: avatarUrl,
+                file_name: chat.fileStem,
+                chat: chatData,
+            }),
+            credentials: 'same-origin',
+        });
+        if (!response.ok) {
+            throw new Error(`Could not save chat "${chat.fileStem}" (HTTP ${response.status}).`);
+        }
+        const result = await response.json();
+        if (!result?.ok) {
+            throw new Error(`SillyTavern could not save chat "${chat.fileStem}".`);
+        }
     }
 }
 
@@ -1029,7 +1574,11 @@ function renderProfileList() {
     `).join('');
 }
 
-async function addProfileFiles(files) {
+function addProfileFiles(files) {
+    return withLongTask(() => processProfileFiles(files));
+}
+
+async function processProfileFiles(files) {
     const status = document.getElementById('migasst_profile_status');
     let added = 0;
     let totalBytes = state.profiles.reduce((total, profile) => total + (profile.fileSize || 0), 0);
@@ -1066,6 +1615,7 @@ async function addProfileFiles(files) {
         setNextLabel(state.profilesImported ? 'Done' : state.profiles.some((profile) => profile.include && profile.type) ? 'Import selected profiles' : 'Skip & finish');
     }
     setStatus(status, `${added} file(s) ready.${errors.length ? ` ${errors.join(' ')}` : ''}`, errors.length > 0);
+    await persistProgress();
 }
 
 async function importPersona(profile) {
@@ -1119,6 +1669,7 @@ async function importProfiles() {
             }
             imported += 1;
             profile.include = false;
+            await persistProgress();
         } catch (error) {
             failures.push(`${profile.card.name}: ${error.message}`);
         }
@@ -1137,38 +1688,74 @@ function finishProfiles(message, isError = false) {
     state.profilesImported = true;
     setStatus(document.getElementById('migasst_profile_status'), message, isError);
     setNextLabel('Done');
+    void persistProgress();
 }
 
 async function discardSession() {
-    if (!state.sessionId) {
+    if (!state.sessionId && !state.clientKey) {
         closeWizard();
         return;
     }
     const { Popup } = getContext();
     const ok = Popup?.show?.confirm
-        ? await Popup.show.confirm('Discard session?', 'Temporary parse data for this migration will be deleted.')
-        : window.confirm('Discard migration session?');
+        ? await Popup.show.confirm('Cancel migration?', 'This deletes the saved progress and temporary migration data. Closing the wizard keeps it available to resume.')
+        : window.confirm('Cancel migration and delete its saved progress?');
     if (!ok) {
         return;
     }
     try {
-        await apiFetch(`/session/${state.sessionId}`, { method: 'DELETE' });
-    } catch {
-        // ignore
+        if (activeUploadController) {
+            activeUploadController.abort();
+            activeUploadController = null;
+        }
+        if (state.sessionId) {
+            await apiFetch(`/session/${state.sessionId}`, { method: 'DELETE' });
+        } else if (state.clientKey) {
+            await apiFetch(`/session/client/${state.clientKey}`, { method: 'DELETE' });
+        }
+    } catch (error) {
+        if (error?.code !== 'SESSION_EXPIRED') {
+            toastr.error(`Could not cancel migration: ${error.message}`, 'Migration Assistant');
+            return;
+        }
     }
+    const clientKey = state.clientKey;
     state.sessionId = null;
     state.chats = [];
+    state.characters = [];
     state.clusters = [];
     state.planItems = [];
+    state.searchHits.clear();
+    state.searchDrafts.clear();
     state.profiles = [];
     state.profilesImported = false;
     state.importCompleted = false;
+    state.importPrepared = false;
+    state.importedClusterIds.clear();
+    state.importedCharacterFiles.clear();
     state.chatOverrides.clear();
     state.matchOverrides.clear();
+    state.clientKey = null;
+    state.step = 'upload';
+    localStorage.removeItem(CLIENT_KEY_STORAGE_KEY);
+    if (clientKey) {
+        try {
+            await deleteProgress(clientKey);
+        } catch (error) {
+            console.error('[migration-assistant] migration was cancelled but local progress could not be cleared:', error);
+            toastr.error('Migration was cancelled, but local progress storage could not be cleared.');
+        }
+    }
+    updateSessionButtons();
+    goToStep('upload');
     closeWizard();
 }
 
-async function onNext() {
+function onNext() {
+    return withLongTask(performNext);
+}
+
+async function performNext() {
     try {
         if (state.step === 'upload') {
             if (state.sessionId) {
@@ -1200,6 +1787,10 @@ async function onNext() {
             }
         }
     } catch (error) {
+        if (await recoverExpiredSession(error)) {
+            toastr.warning('The previous migration session expired. Re-upload your export to continue.', 'Migration Assistant');
+            return;
+        }
         toastr.error(error.message || 'Step failed', 'Migration Assistant');
     }
 }
@@ -1212,6 +1803,10 @@ function onBack() {
 }
 
 function bindWizardEvents(root) {
+    if (!root) {
+        console.error('[migration-assistant] cannot bind wizard events because the wizard markup is missing');
+        return;
+    }
     root.querySelector('#migasst_close')?.addEventListener('click', () => closeWizard());
     root.querySelector('#migasst_back')?.addEventListener('click', onBack);
     root.querySelector('#migasst_next')?.addEventListener('click', onNext);
@@ -1268,6 +1863,7 @@ function bindWizardEvents(root) {
                 chat.skip = nextSkip;
             }
             renderChatList();
+            persistProgressSoon();
         }
     });
 
@@ -1296,10 +1892,12 @@ function bindWizardEvents(root) {
                 state.matchOverrides.set(clusterId, { clusterId, action: 'skip' });
             }
             renderMatchList();
+            persistProgressSoon();
         }
         if (btn.dataset.action === 'keep-match') {
             state.matchOverrides.set(clusterId, { clusterId, action: 'keep' });
             renderMatchList();
+            persistProgressSoon();
         }
         if (btn.dataset.action === 'pick-candidate') {
             const candidate = (cluster?.candidates || []).find((c) => c.key === btn.dataset.key);
@@ -1315,10 +1913,11 @@ function bindWizardEvents(root) {
                     },
                 });
                 renderMatchList();
+                persistProgressSoon();
             }
         }
     });
-
+    root.querySelector('#migasst_search_list')?.addEventListener('input', () => persistProgressSoon());
     root.querySelector('#migasst_search_list')?.addEventListener('click', async (e) => {
         const btn = e.target.closest('button[data-action]');
         const row = e.target.closest('[data-cluster-id]');
@@ -1327,16 +1926,17 @@ function bindWizardEvents(root) {
         }
         const clusterId = row.getAttribute('data-cluster-id');
         if (btn.dataset.action === 'search-greeting') {
-            await runClusterSearch(clusterId, 'greeting');
+            await withLongTask(() => runClusterSearch(clusterId, 'greeting'));
         }
         if (btn.dataset.action === 'search-query') {
-            await runClusterSearch(clusterId, 'query');
+            await withLongTask(() => runClusterSearch(clusterId, 'query'));
         }
         if (btn.dataset.action === 'save-manual') {
             try {
-                await saveManualCharacter(clusterId, row);
+                await withLongTask(() => saveManualCharacter(clusterId, row));
                 toastr.success('Manual character saved for this cluster');
                 renderSearchList();
+                void persistProgress();
             } catch (error) {
                 toastr.error(error.message || 'Could not save manual character.');
             }
@@ -1344,6 +1944,7 @@ function bindWizardEvents(root) {
         if (btn.dataset.action === 'skip-cluster') {
             state.matchOverrides.set(clusterId, { clusterId, action: 'skip' });
             renderSearchList();
+            persistProgressSoon();
         }
         if (btn.dataset.action === 'apply-search') {
             const hit = state.searchHits.get(btn.dataset.hitId || '');
@@ -1356,6 +1957,7 @@ function bindWizardEvents(root) {
                 character: hit,
             });
             toastr.success('Search result applied');
+            persistProgressSoon();
         }
     });
     root.querySelector('#migasst_search_list')?.addEventListener('change', (event) => {
@@ -1364,6 +1966,17 @@ function bindWizardEvents(root) {
         if (file && row) {
             void loadCardIntoSearchRow(file, row);
             event.target.value = '';
+        }
+    });
+    root.querySelector('#migasst_import_list')?.addEventListener('change', (event) => {
+        if (event.target.dataset.action !== 'toggle-include') {
+            return;
+        }
+        const row = event.target.closest('[data-cluster-id]');
+        const item = state.planItems.find((planItem) => planItem.clusterId === row?.dataset.clusterId);
+        if (item) {
+            item.include = event.target.checked;
+            persistProgressSoon();
         }
     });
     root.querySelector('#migasst_profile_list')?.addEventListener('input', (event) => {
@@ -1378,6 +1991,7 @@ function bindWizardEvents(root) {
         } else {
             profile.card[field] = event.target.value;
         }
+        persistProgressSoon();
     });
     root.querySelector('#migasst_profile_list')?.addEventListener('change', async (event) => {
         const field = event.target.dataset.field;
@@ -1395,6 +2009,7 @@ function bindWizardEvents(root) {
             if (next) {
                 setNextLabel(state.profilesImported ? 'Done' : state.profiles.some((item) => item.include && item.type) ? 'Import selected profiles' : 'Skip & finish');
             }
+            persistProgressSoon();
         } else if (field === 'include') {
             profile.include = event.target.checked;
             const next = root.querySelector('#migasst_next');
@@ -1404,17 +2019,21 @@ function bindWizardEvents(root) {
             if (next) {
                 setNextLabel(state.profilesImported ? 'Done' : state.profiles.some((item) => item.include && item.type) ? 'Import selected profiles' : 'Skip & finish');
             }
+            persistProgressSoon();
         } else if (field === 'image') {
             const imageFile = event.target.files?.[0];
             if (imageFile) {
-                try {
-                    if (imageFile.size > 12 * 1024 * 1024) {
-                        throw new Error('Images must be smaller than 12 MB.');
+                await withLongTask(async () => {
+                    try {
+                        if (imageFile.size > 12 * 1024 * 1024) {
+                            throw new Error('Images must be smaller than 12 MB.');
+                        }
+                        profile.imageDataUrl = await readAsDataUrl(imageFile);
+                        await persistProgress();
+                    } catch (error) {
+                        toastr.error(error.message || 'Could not read profile image.');
                     }
-                    profile.imageDataUrl = await readAsDataUrl(imageFile);
-                } catch (error) {
-                    toastr.error(error.message || 'Could not read profile image.');
-                }
+                });
             }
         }
     });
@@ -1426,27 +2045,77 @@ async function mountUi() {
         console.warn('[migration-assistant] extensions settings panel not found');
         return;
     }
+    if (window[RUNTIME_KEY]) {
+        return;
+    }
+    window[RUNTIME_KEY] = true;
 
     ensureAssets();
-    const settingsHtml = await fetch(`${EXTENSION_FOLDER}/settings.html`).then((r) => r.text());
-    const wizardHtml = await fetch(`${EXTENSION_FOLDER}/wizard.html`).then((r) => r.text());
-    const { DOMPurify } = SillyTavern.libs;
-    settingsHost.insertAdjacentHTML('beforeend', DOMPurify.sanitize(settingsHtml, {
-        FORBID_TAGS: ['link'],
-    }));
-    document.body.insertAdjacentHTML('beforeend', DOMPurify.sanitize(wizardHtml, {
-        ADD_ATTR: ['data-step', 'data-panel', 'data-i18n', 'for'],
-        FORBID_TAGS: ['link'],
-    }));
+    const $settingsHost = $(settingsHost);
+    if (!document.getElementById('migration_assistant_settings')) {
+        $settingsHost.append(`
+            <div class="migration-assistant-settings" id="migration_assistant_settings" data-theme="dark">
+                <div class="inline-drawer">
+                    <div class="inline-drawer-toggle inline-drawer-header">
+                        <b data-i18n="Migration Assistant">Migration Assistant</b>
+                        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                    </div>
+                    <div class="inline-drawer-content">
+                        <div class="migasst-settings-card">
+                            <div class="migasst-settings-card-mark" aria-hidden="true"></div>
+                            <div class="migasst-settings-card-body">
+                                <p class="migasst-settings-kicker">CharacterAI → SillyTavern</p>
+                                <p class="migasst-settings-copy" data-i18n="migasst_settings_blurb">
+                                    Migrate CharacterAI exports into SillyTavern. Review chat sorting and character matches before anything is imported.
+                                </p>
+                                <div class="migasst-settings-actions">
+                                    <input type="submit" id="migasst_resume_migration" class="menu_button migasst-btn migasst-btn-ghost" hidden
+                                        value="Resume Migration" data-i18n="[value]Resume Migration">
+                                    <input type="submit" id="migasst_open_wizard" class="menu_button migasst-btn migasst-btn-primary"
+                                        value="Begin Migration" data-i18n="[value]Begin Migration">
+                                    <label class="migasst-theme-toggle">
+                                        <span id="migasst_theme_label">Dark mode</span>
+                                        <input type="checkbox" id="migasst_theme_toggle" role="switch" aria-label="Dark mode" checked aria-checked="true">
+                                        <span class="migasst-theme-track" aria-hidden="true"></span>
+                                    </label>
+                                </div>
+                                <p class="migasst-settings-copy migasst-resume-hint">
+                                    Close the wizard to pause at a review checkpoint. Resume it here, or cancel to delete the saved progress.
+                                </p>
+                                <div id="migasst_plugin_status" class="migasst-plugin-status" aria-live="polite"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `);
+    }
+    if (!document.getElementById('migasst_wizard')) {
+        try {
+            const wizardHtml = await $.get(WIZARD_TEMPLATE_URL);
+            $('body').append(wizardHtml);
+        } catch (error) {
+            delete window[RUNTIME_KEY];
+            console.error('[migration-assistant] failed to load wizard.html:', error);
+            toastr.error('Migration Assistant could not load its wizard. Confirm wizard.html is installed beside index.js.', 'Migration Assistant');
+            return;
+        }
+    }
     const wizard = document.getElementById('migasst_wizard');
     if (wizard) {
         wizard.hidden = true;
     }
 
-    const openBtn = document.getElementById('migasst_open_wizard');
-    openBtn?.addEventListener('click', openWizard);
-    document.getElementById('migasst_theme_toggle')?.addEventListener('change', (event) => {
+    $settingsHost.on('click', '#migasst_open_wizard, #migasst_resume_migration', openMigrationWindow);
+    $settingsHost.on('input', '#migasst_theme_toggle', (event) => {
         applyTheme(event.target.checked ? 'dark' : 'light');
+    });
+    window.addEventListener('pagehide', () => {
+        if (progressSaveTimer) {
+            clearTimeout(progressSaveTimer);
+            progressSaveTimer = null;
+        }
+        void persistProgress();
     });
     initializeTheme();
     bindWizardEvents(document.getElementById('migasst_wizard'));
@@ -1457,6 +2126,13 @@ async function mountUi() {
         status.textContent = alive
             ? 'Server plugin connected.'
             : 'Server plugin not detected. Enable enableServerPlugins and install server-plugin/.';
+    }
+    if (alive) {
+        await restoreSession();
+        updateSessionButtons();
+    }
+    if (consumeBeginMigrationRequest()) {
+        openWizard();
     }
 }
 
