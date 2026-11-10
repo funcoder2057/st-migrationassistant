@@ -120,7 +120,7 @@ function stagePayloads(sessionDir, payloads) {
     for (const payload of payloads) {
         const folder = path.resolve(staging, safeFileStem(payload.character.name) + '_' + payload.clusterId);
         const rel = path.relative(resolvedStaging, folder);
-        if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+        if (!rel || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
             throw new Error('Refusing to write outside staging directory.');
         }
         fs.mkdirSync(folder, { recursive: true });

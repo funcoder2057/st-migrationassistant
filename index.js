@@ -5,9 +5,10 @@ import { extension_settings } from '../../../extensions.js';
 
 const MODULE_NAME = 'st-migrationasst';
 const PLUGIN_ID = 'migration-assistant';
+const RUNTIME_KEY = '__stMigrationAssistantMounted';
 const PLUGIN_BASE = `/api/plugins/${PLUGIN_ID}`;
 const WIZARD_TEMPLATE_URL = new URL('./wizard.html', import.meta.url).href;
-const STYLESHEET_URL = new URL('./style.css?v=5', import.meta.url).href;
+const STYLESHEET_URL = new URL('./style.css?v=7', import.meta.url).href;
 
 const STEPS = ['upload', 'chats', 'match', 'search', 'import', 'profiles'];
 const THEME_STORAGE_KEY = 'migasst-theme-v2';
@@ -45,6 +46,7 @@ const state = {
     importCompleted: false,
     importPrepared: false,
     importedClusterIds: new Set(),
+    importedCharacterFiles: new Map(),
     clientKey: null,
 };
 
@@ -53,6 +55,17 @@ let progressWriteQueue = Promise.resolve();
 let serverStepWriteQueue = Promise.resolve();
 let progressSaveTimer = null;
 let activeUploadController = null;
+let longTaskCount = 0;
+let longTaskShowTimer = null;
+let longTaskRotationTimer = null;
+let longTaskMessageIndex = 0;
+
+const LONG_TASK_MESSAGES = [
+    'Still working. Your migration is in progress.',
+    'You talk a lot, give us a few minutes to read it all.',
+    "That's a lot of words, let us sort through it, grab a coffee.",
+    'This migration has more plot than a season finale. Almost there.',
+];
 
 function getContext() {
     return SillyTavern.getContext();
@@ -260,20 +273,42 @@ async function apiFetch(path, options = {}) {
     const res = await fetch(`${PLUGIN_BASE}${path}`, opts);
     if (!res.ok) {
         let message = `Request failed (${res.status})`;
+        let code = null;
         try {
             const data = await res.json();
             if (data?.error) {
                 message = data.error;
+                if (data.error === 'Session not found or expired.') {
+                    code = 'SESSION_EXPIRED';
+                }
             }
         } catch {
             // ignore
         }
-        throw new Error(message);
+        const error = new Error(message);
+        error.status = res.status;
+        error.code = code;
+        throw error;
     }
     if (res.status === 204) {
         return null;
     }
     return res.json();
+}
+
+async function getFreshRequestHeaders(options = {}) {
+    const tokenResponse = await fetch('/csrf-token', { credentials: 'same-origin' });
+    if (!tokenResponse.ok) {
+        throw new Error(`Could not refresh SillyTavern's CSRF token (HTTP ${tokenResponse.status}).`);
+    }
+    const tokenData = await tokenResponse.json();
+    if (typeof tokenData?.token !== 'string' || !tokenData.token) {
+        throw new Error('SillyTavern returned an invalid CSRF token.');
+    }
+    return {
+        ...getRequestHeaders(options),
+        'X-CSRF-Token': tokenData.token,
+    };
 }
 
 function getClientKey() {
@@ -322,6 +357,7 @@ function makeProgressSnapshot() {
         importCompleted: state.importCompleted,
         importPrepared: state.importPrepared,
         importedClusterIds: [...state.importedClusterIds],
+        importedCharacterFiles: [...state.importedCharacterFiles.entries()],
     };
 }
 
@@ -401,12 +437,66 @@ function updateSessionButtons() {
     }
 }
 
+async function recoverExpiredSession(error) {
+    if (error?.code !== 'SESSION_EXPIRED' || !state.sessionId) {
+        return false;
+    }
+
+    const clientKey = state.clientKey || localStorage.getItem(CLIENT_KEY_STORAGE_KEY);
+    state.clientKey = clientKey;
+    state.sessionId = null;
+    state.chats = [];
+    state.characters = [];
+    state.clusters = [];
+    state.planItems = [];
+    state.chatOverrides.clear();
+    state.matchOverrides.clear();
+    state.searchHits.clear();
+    state.searchDrafts.clear();
+    state.profiles = [];
+    state.profilesImported = false;
+    state.importCompleted = false;
+    state.importPrepared = false;
+    state.importedClusterIds.clear();
+    state.importedCharacterFiles.clear();
+    state.stats = null;
+    state.openChatId = null;
+    state.step = 'upload';
+
+    if (clientKey) {
+        try {
+            await deleteProgress(clientKey);
+        } catch (storageError) {
+            console.error('[migration-assistant] could not clear expired migration progress:', storageError);
+            toastr.error('The old migration session expired, and its saved browser progress could not be cleared.');
+        }
+    }
+
+    renderChatList();
+    renderMatchList();
+    renderSearchList();
+    renderImportList();
+    renderProfileList();
+    updateSessionButtons();
+    setStatus(
+        document.getElementById('migasst_upload_status'),
+        'This migration session is no longer available, often because SillyTavern was restarted. Re-upload your export to continue.',
+        true,
+    );
+    goToStep('upload');
+    return true;
+}
+
 function saveServerStep(sessionId, step) {
     serverStepWriteQueue = serverStepWriteQueue.then(() => apiFetch(`/session/${sessionId}/progress`, {
         method: 'POST',
         body: { step },
     })).catch((error) => {
-        console.error('[migration-assistant] could not save migration step:', error);
+        if (error?.code === 'SESSION_EXPIRED') {
+            void recoverExpiredSession(error);
+        } else {
+            console.error('[migration-assistant] could not save migration step:', error);
+        }
     });
 }
 
@@ -427,6 +517,7 @@ function restoreSnapshot(snapshot, saved) {
     state.importCompleted = !!saved?.importCompleted;
     state.importPrepared = !!(snapshot.importPrepared || saved?.importPrepared);
     state.importedClusterIds = new Set(saved?.importedClusterIds || []);
+    state.importedCharacterFiles = new Map(saved?.importedCharacterFiles || []);
     const savedStep = STEPS.includes(snapshot.step)
         ? snapshot.step
         : saved?.sessionId === snapshot.sessionId && STEPS.includes(saved.step)
@@ -449,7 +540,7 @@ function restoreSnapshot(snapshot, saved) {
         importStats.textContent = `${snapshot.planSummary.characters} characters · ${snapshot.planSummary.chats} chats · ${snapshot.planSummary.messages} messages`;
     }
     if (snapshot.importPrepared && !state.importCompleted) {
-        setStatus(document.getElementById('migasst_import_result'), 'Import was interrupted. Resume to continue without repeating completed characters.');
+        setStatus(document.getElementById('migasst_import_result'), 'Import was interrupted. Resume to continue without repeating completed imports.');
     }
     for (const [clusterId, draft] of state.searchDrafts) {
         const row = document.querySelector(`#migasst_search_list [data-cluster-id="${CSS.escape(clusterId)}"]`);
@@ -477,8 +568,9 @@ async function restoreSession() {
         return false;
     }
     state.clientKey = clientKey;
+    let saved = null;
     try {
-        const saved = await loadProgress(clientKey);
+        saved = await loadProgress(clientKey);
         let snapshot;
         if (saved?.sessionId) {
             try {
@@ -499,6 +591,20 @@ async function restoreSession() {
         }
         return true;
     } catch (error) {
+        if (saved?.sessionId && /no active migration|not ready|session not found|expired/i.test(error.message)) {
+            try {
+                await deleteProgress(clientKey);
+            } catch (storageError) {
+                console.error('[migration-assistant] could not clear expired migration progress:', storageError);
+                toastr.error('The old migration session expired, and its saved browser progress could not be cleared.');
+            }
+            setStatus(
+                document.getElementById('migasst_upload_status'),
+                'This migration session is no longer available, often because SillyTavern was restarted. Re-upload your export to continue.',
+                true,
+            );
+            return false;
+        }
         if (!/no active migration|not ready|session not found|expired/i.test(error.message)) {
             console.error('[migration-assistant] could not restore migration:', error);
             const status = document.getElementById('migasst_plugin_status');
@@ -528,6 +634,49 @@ function setStatus(el, text, isError = false) {
     el.classList.toggle('is-error', !!isError);
 }
 
+function updateLongTaskMessage() {
+    const message = document.getElementById('migasst_long_task_message');
+    if (message) {
+        message.textContent = LONG_TASK_MESSAGES[longTaskMessageIndex];
+    }
+}
+
+function showLongTask() {
+    const indicator = document.getElementById('migasst_long_task');
+    if (!indicator || longTaskCount === 0) {
+        return;
+    }
+    longTaskMessageIndex = 0;
+    updateLongTaskMessage();
+    indicator.hidden = false;
+    longTaskRotationTimer = setInterval(() => {
+        longTaskMessageIndex = (longTaskMessageIndex + 1) % LONG_TASK_MESSAGES.length;
+        updateLongTaskMessage();
+    }, 5 * 60 * 1000);
+}
+
+async function withLongTask(operation) {
+    longTaskCount += 1;
+    if (longTaskCount === 1) {
+        longTaskShowTimer = setTimeout(showLongTask, 5000);
+    }
+    try {
+        return await operation();
+    } finally {
+        longTaskCount = Math.max(0, longTaskCount - 1);
+        if (longTaskCount === 0) {
+            clearTimeout(longTaskShowTimer);
+            clearInterval(longTaskRotationTimer);
+            longTaskShowTimer = null;
+            longTaskRotationTimer = null;
+            const indicator = document.getElementById('migasst_long_task');
+            if (indicator) {
+                indicator.hidden = true;
+            }
+        }
+    }
+}
+
 function ensureAssets() {
     if (!document.getElementById('migasst_font_link')) {
         const preconnect1 = document.createElement('link');
@@ -544,9 +693,11 @@ function ensureAssets() {
         document.head.append(preconnect1, preconnect2, font);
     }
     const stylesheetPath = new URL(STYLESHEET_URL).pathname;
-    const hasStylesheet = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
-        .some((stylesheet) => stylesheet.href && new URL(stylesheet.href).pathname === stylesheetPath);
-    if (!hasStylesheet && !document.getElementById('migasst_style_link')) {
+    const stylesheet = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+        .find((link) => link.href && new URL(link.href).pathname === stylesheetPath);
+    if (stylesheet) {
+        stylesheet.href = STYLESHEET_URL;
+    } else if (!document.getElementById('migasst_style_link')) {
         const link = document.createElement('link');
         link.id = 'migasst_style_link';
         link.rel = 'stylesheet';
@@ -696,7 +847,11 @@ function goToStep(step) {
     }
 }
 
-async function handleUpload(file) {
+function handleUpload(file) {
+    return withLongTask(() => performUpload(file));
+}
+
+async function performUpload(file) {
     const status = document.getElementById('migasst_upload_status');
     if (!file) {
         return;
@@ -731,6 +886,7 @@ async function handleUpload(file) {
         state.importCompleted = false;
         state.importPrepared = false;
         state.importedClusterIds.clear();
+        state.importedCharacterFiles.clear();
         const characterLabel = data.stats?.characterCount
             ? ` · ${data.stats.characterCount} export characters`
             : ' · no character data (you can add cards later)';
@@ -821,6 +977,9 @@ async function openChatDrawer(chatId) {
             </div>`;
         }).join('');
     } catch (error) {
+        if (await recoverExpiredSession(error)) {
+            return;
+        }
         msgList.innerHTML = `<p class="migasst-status is-error">${escapeHtml(error.message)}</p>`;
     }
 }
@@ -1042,7 +1201,11 @@ async function saveManualCharacter(clusterId, row) {
     await persistProgress();
 }
 
-async function loadCardIntoSearchRow(file, row) {
+function loadCardIntoSearchRow(file, row) {
+    return withLongTask(() => processCardIntoSearchRow(file, row));
+}
+
+async function processCardIntoSearchRow(file, row) {
     try {
         const card = await decodeCardMetadata(file);
         const isPng = file.type === 'image/png' || file.name.toLowerCase().endsWith('.png');
@@ -1160,7 +1323,13 @@ async function runImport() {
                 continue;
             }
             try {
-                await importCharacterPayload(payload);
+                let avatarUrl = state.importedCharacterFiles.get(payload.clusterId);
+                if (!avatarUrl) {
+                    avatarUrl = await importCharacterPayload(payload);
+                    state.importedCharacterFiles.set(payload.clusterId, avatarUrl);
+                    await persistProgress();
+                }
+                await importChats(payload, avatarUrl);
                 imported += 1;
                 state.importedClusterIds.add(payload.clusterId);
                 await persistProgress();
@@ -1178,6 +1347,9 @@ async function runImport() {
         await persistProgress();
         goToStep('profiles');
     } catch (error) {
+        if (await recoverExpiredSession(error)) {
+            return;
+        }
         setStatus(result, error.message || 'Import failed.', true);
     }
 }
@@ -1197,7 +1369,7 @@ async function importCharacterPayload(payload) {
     form.append('file_type', fileType);
     const res = await fetch('/api/characters/import', {
         method: 'POST',
-        headers: getRequestHeaders({ omitContentType: true }),
+        headers: await getFreshRequestHeaders({ omitContentType: true }),
         body: form,
         credentials: 'same-origin',
     });
@@ -1207,6 +1379,41 @@ async function importCharacterPayload(payload) {
     const response = await res.json();
     if (response.error) {
         throw new Error('SillyTavern could not import this character card.');
+    }
+    if (typeof response.file_name !== 'string' || !response.file_name) {
+        throw new Error('SillyTavern did not return the imported character filename.');
+    }
+    return response.file_name;
+}
+
+async function importChats(payload, avatarUrl) {
+    const chats = Array.isArray(payload.chats) ? payload.chats : [];
+    for (const chat of chats) {
+        const chatData = [
+            {
+                chat_metadata: {},
+                user_name: getContext().name1 || 'User',
+                character_name: payload.character.name,
+            },
+            ...chat.messages,
+        ];
+        const response = await fetch('/api/chats/save', {
+            method: 'POST',
+            headers: await getFreshRequestHeaders(),
+            body: JSON.stringify({
+                avatar_url: avatarUrl,
+                file_name: chat.fileStem,
+                chat: chatData,
+            }),
+            credentials: 'same-origin',
+        });
+        if (!response.ok) {
+            throw new Error(`Could not save chat "${chat.fileStem}" (HTTP ${response.status}).`);
+        }
+        const result = await response.json();
+        if (!result?.ok) {
+            throw new Error(`SillyTavern could not save chat "${chat.fileStem}".`);
+        }
     }
 }
 
@@ -1367,7 +1574,11 @@ function renderProfileList() {
     `).join('');
 }
 
-async function addProfileFiles(files) {
+function addProfileFiles(files) {
+    return withLongTask(() => processProfileFiles(files));
+}
+
+async function processProfileFiles(files) {
     const status = document.getElementById('migasst_profile_status');
     let added = 0;
     let totalBytes = state.profiles.reduce((total, profile) => total + (profile.fileSize || 0), 0);
@@ -1503,8 +1714,10 @@ async function discardSession() {
             await apiFetch(`/session/client/${state.clientKey}`, { method: 'DELETE' });
         }
     } catch (error) {
-        toastr.error(`Could not cancel migration: ${error.message}`, 'Migration Assistant');
-        return;
+        if (error?.code !== 'SESSION_EXPIRED') {
+            toastr.error(`Could not cancel migration: ${error.message}`, 'Migration Assistant');
+            return;
+        }
     }
     const clientKey = state.clientKey;
     state.sessionId = null;
@@ -1519,6 +1732,7 @@ async function discardSession() {
     state.importCompleted = false;
     state.importPrepared = false;
     state.importedClusterIds.clear();
+    state.importedCharacterFiles.clear();
     state.chatOverrides.clear();
     state.matchOverrides.clear();
     state.clientKey = null;
@@ -1537,7 +1751,11 @@ async function discardSession() {
     closeWizard();
 }
 
-async function onNext() {
+function onNext() {
+    return withLongTask(performNext);
+}
+
+async function performNext() {
     try {
         if (state.step === 'upload') {
             if (state.sessionId) {
@@ -1569,6 +1787,10 @@ async function onNext() {
             }
         }
     } catch (error) {
+        if (await recoverExpiredSession(error)) {
+            toastr.warning('The previous migration session expired. Re-upload your export to continue.', 'Migration Assistant');
+            return;
+        }
         toastr.error(error.message || 'Step failed', 'Migration Assistant');
     }
 }
@@ -1704,14 +1926,14 @@ function bindWizardEvents(root) {
         }
         const clusterId = row.getAttribute('data-cluster-id');
         if (btn.dataset.action === 'search-greeting') {
-            await runClusterSearch(clusterId, 'greeting');
+            await withLongTask(() => runClusterSearch(clusterId, 'greeting'));
         }
         if (btn.dataset.action === 'search-query') {
-            await runClusterSearch(clusterId, 'query');
+            await withLongTask(() => runClusterSearch(clusterId, 'query'));
         }
         if (btn.dataset.action === 'save-manual') {
             try {
-                await saveManualCharacter(clusterId, row);
+                await withLongTask(() => saveManualCharacter(clusterId, row));
                 toastr.success('Manual character saved for this cluster');
                 renderSearchList();
                 void persistProgress();
@@ -1801,15 +2023,17 @@ function bindWizardEvents(root) {
         } else if (field === 'image') {
             const imageFile = event.target.files?.[0];
             if (imageFile) {
-                try {
-                    if (imageFile.size > 12 * 1024 * 1024) {
-                        throw new Error('Images must be smaller than 12 MB.');
+                await withLongTask(async () => {
+                    try {
+                        if (imageFile.size > 12 * 1024 * 1024) {
+                            throw new Error('Images must be smaller than 12 MB.');
+                        }
+                        profile.imageDataUrl = await readAsDataUrl(imageFile);
+                        await persistProgress();
+                    } catch (error) {
+                        toastr.error(error.message || 'Could not read profile image.');
                     }
-                    profile.imageDataUrl = await readAsDataUrl(imageFile);
-                    await persistProgress();
-                } catch (error) {
-                    toastr.error(error.message || 'Could not read profile image.');
-                }
+                });
             }
         }
     });
@@ -1821,6 +2045,10 @@ async function mountUi() {
         console.warn('[migration-assistant] extensions settings panel not found');
         return;
     }
+    if (window[RUNTIME_KEY]) {
+        return;
+    }
+    window[RUNTIME_KEY] = true;
 
     ensureAssets();
     const $settingsHost = $(settingsHost);
@@ -1867,6 +2095,7 @@ async function mountUi() {
             const wizardHtml = await $.get(WIZARD_TEMPLATE_URL);
             $('body').append(wizardHtml);
         } catch (error) {
+            delete window[RUNTIME_KEY];
             console.error('[migration-assistant] failed to load wizard.html:', error);
             toastr.error('Migration Assistant could not load its wizard. Confirm wizard.html is installed beside index.js.', 'Migration Assistant');
             return;

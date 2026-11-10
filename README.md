@@ -47,9 +47,9 @@ Restart SillyTavern. The UI status line should read **Server plugin connected.**
 
 Character cards can also be added to unmatched clusters during Search. PNG card metadata is parsed as JSON and projected onto an explicit allowlist; arbitrary extensions and executable fields are not imported. Manual entries accept a greeting, description, definition, and optional image.
 
-The SillyTavern **Extensions** panel provides a persistent light/dark switch, **Begin Migration**, and a **Resume Migration** button when a session is active. Begin and Resume open a full-size SillyTavern popup with the wizard ready at the saved step. Closing the wizard leaves the migration intact; progress and review choices are saved in the browser so the wizard can resume after navigation or reload while the server session is available. **Cancel Migration** explicitly removes the temporary session and saved progress.
+The SillyTavern **Extensions** panel provides a persistent light/dark switch, **Begin Migration**, and a **Resume Migration** button when a session is active. Begin and Resume open a full-size SillyTavern popup with the wizard ready at the saved step. Closing the wizard leaves the migration intact; progress and review choices are saved in the browser so the wizard can resume after navigation or reload while the server session is available. If SillyTavern restarts and loses its in-memory session, the wizard returns to Upload and asks you to upload the export again. **Cancel Migration** explicitly removes the temporary session and saved progress.
 
-Work already running when the wizard is closed continues to its next user-input checkpoint. Chat and character imports record completed items so resuming does not intentionally repeat successful imports.
+Work already running when the wizard is closed continues to its next user-input checkpoint. Actions lasting over five seconds show a spinner and a status message; if work continues, the message changes every five minutes. Characters and their chats are saved through SillyTavern's own import and chat-save APIs; completed items are recorded so resuming does not intentionally repeat successful imports.
 
 ## API stub
 

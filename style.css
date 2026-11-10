@@ -28,6 +28,8 @@
 
     position: fixed !important;
     inset: 0 !important;
+    height: 100vh !important;
+    height: 100dvh !important;
     z-index: 100000 !important;
     display: none;
     align-items: stretch;
@@ -165,6 +167,56 @@
     display: none !important;
 }
 
+#migasst_wizard .migasst-long-task {
+    position: fixed;
+    z-index: 3;
+    left: 50%;
+    bottom: max(5.5rem, calc(env(safe-area-inset-bottom) + 5rem));
+    width: min(340px, calc(100vw - 2rem));
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1.15rem 1.35rem;
+    border: 1px solid var(--mig-line);
+    border-radius: 14px;
+    background: var(--mig-paper);
+    color: var(--mig-ink);
+    box-shadow: var(--mig-shadow);
+    text-align: center;
+    pointer-events: none;
+}
+
+#migasst_wizard .migasst-long-task-spinner {
+    width: 30px;
+    height: 30px;
+    border: 3px solid var(--mig-line);
+    border-top-color: var(--mig-blue);
+    border-radius: 50%;
+    animation: migasst-long-task-spin 850ms linear infinite;
+}
+
+#migasst_wizard .migasst-long-task p {
+    margin: 0;
+    font-size: 0.92rem;
+    line-height: 1.45;
+}
+
+@keyframes migasst-long-task-spin {
+    to { transform: rotate(360deg); }
+}
+
+#migasst_wizard .migasst-long-task[hidden] {
+    display: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #migasst_wizard .migasst-long-task-spinner {
+        animation: none;
+    }
+}
+
 #migasst_wizard .migasst-backdrop {
     position: absolute;
     inset: 0;
@@ -180,8 +232,10 @@
     z-index: 1;
     width: min(1180px, 100%);
     height: min(860px, 100%);
+    min-height: 0;
     display: grid;
     grid-template-columns: 280px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     background: var(--mig-light);
     border-radius: 22px;
     overflow: hidden;
@@ -395,6 +449,7 @@
     display: grid;
     grid-template-rows: auto minmax(0, 1fr) auto;
     min-width: 0;
+    min-height: 0;
     background:
         linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(235, 242, 250, 0.92)),
         var(--mig-light);
@@ -461,8 +516,12 @@
 
 #migasst_wizard .migasst-workspace {
     position: relative;
-    overflow: auto;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
     padding: 1.15rem 1.4rem 1.3rem;
+    scrollbar-gutter: stable;
+    -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
 }
 
@@ -1305,12 +1364,15 @@
 @media (max-width: 900px) {
     #migasst_wizard .migasst-shell {
         grid-template-columns: 1fr;
+        grid-template-rows: minmax(0, auto) minmax(0, 1fr);
         height: min(920px, 100%);
     }
 
     #migasst_wizard .migasst-rail {
+        min-height: 0;
         gap: 0.85rem;
         padding: 1rem;
+        overflow-y: auto;
     }
 
     #migasst_wizard .migasst-stepper {
