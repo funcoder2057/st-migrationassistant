@@ -2,7 +2,6 @@
 
 const path = require('path');
 const fs = require('fs');
-const multer = require('multer');
 const { createSession, getSession, getSessionByClientKey, destroySession, destroyAll } = require('./lib/sessions');
 const { extractExportZip } = require('./lib/zip');
 const { parseExport, applyChatOverrides } = require('./lib/parse');
@@ -54,25 +53,6 @@ function jsonParser(req, res, next) {
         }
     });
 }
-
-const upload = multer({
-    storage: multer.memoryStorage(),
-    limits: {
-        fileSize: MAX_UPLOAD_BYTES,
-        files: 1,
-        fields: 5,
-    },
-    fileFilter: (_req, file, cb) => {
-        const name = String(file.originalname || '').toLowerCase();
-        const okZip = name.endsWith('.zip') || file.mimetype === 'application/zip' || file.mimetype === 'application/x-zip-compressed';
-        const okJson = name.endsWith('.json') || file.mimetype === 'application/json' || file.mimetype === 'text/json';
-        if (!okZip && !okJson) {
-            cb(new Error('Choose a CharacterAI export .zip or message .json file.'));
-            return;
-        }
-        cb(null, true);
-    },
-});
 
 /**
  * Require a valid session; send 404 otherwise.
@@ -258,68 +238,87 @@ async function init(router) {
     });
 
     router.post('/upload', (req, res) => {
-        upload.single('export')(req, res, (err) => {
-            if (err) {
-                const status = err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
-                return res.status(status).json({ error: err.message || 'Upload failed.' });
+        let sessionId = null;
+        const uploadedFile = req.file;
+        try {
+            if (!uploadedFile || uploadedFile.fieldname !== 'avatar') {
+                return res.status(400).json({ error: 'Missing uploaded export file.' });
+            }
+            if (uploadedFile.size > MAX_UPLOAD_BYTES) {
+                return res.status(413).json({ error: 'Export files must be smaller than 200 MB.' });
             }
 
-            let sessionId = null;
-            try {
-                if (!req.file?.buffer?.length) {
-                    return res.status(400).json({ error: 'Missing export file.' });
-                }
-
-                const clientKey = typeof req.body?.clientKey === 'string' && /^[a-f0-9]{48}$/.test(req.body.clientKey)
-                    ? req.body.clientKey
-                    : null;
-                const created = createSession(clientKey);
-                sessionId = created.id;
-                const isZip = String(req.file.originalname || '').toLowerCase().endsWith('.zip')
-                    || req.file.mimetype === 'application/zip'
-                    || req.file.mimetype === 'application/x-zip-compressed';
-                let parsed;
-                let imageCount = 0;
-                if (isZip) {
-                    const extracted = extractExportZip(req.file.buffer, created.dir);
-                    parsed = parseExport(extracted.files.messages, extracted.files.characters, extracted.files.user);
-                    imageCount = extracted.imageCount;
-                } else {
-                    const messagesPath = path.join(created.dir, 'message.json');
-                    fs.writeFileSync(messagesPath, req.file.buffer);
-                    parsed = parseExport(messagesPath, null, null);
-                }
-
-                const session = getSession(sessionId);
-                session.data.parsed = parsed;
-                session.data.imageCount = imageCount;
-                markProcessStep(session, 'chats');
-
-                // Drop the raw upload buffer reference ASAP
-                req.file.buffer = null;
-
-                return res.json({
-                    sessionId,
-                    user: parsed.user,
-                    stats: parsed.stats,
-                    imageCount,
-                    chats: summarizeChats(parsed),
-                    characters: parsed.characters.map((c) => ({
-                        key: c.key,
-                        name: c.name,
-                        title: c.title,
-                        greetingPreview: String(c.greeting || '').slice(0, 160),
-                        hasDefinition: !!c.definition,
-                    })),
-                });
-            } catch (error) {
-                if (sessionId) {
-                    destroySession(sessionId);
-                }
-                console.error('[migration-assistant] upload failed:', error.message);
-                return res.status(400).json({ error: 'Could not process the uploaded export.' });
+            const name = String(uploadedFile.originalname || '').toLowerCase();
+            const isZip = name.endsWith('.zip')
+                || uploadedFile.mimetype === 'application/zip'
+                || uploadedFile.mimetype === 'application/x-zip-compressed';
+            const isJson = name.endsWith('.json')
+                || uploadedFile.mimetype === 'application/json'
+                || uploadedFile.mimetype === 'text/json';
+            if (!isZip && !isJson) {
+                return res.status(400).json({ error: 'Choose a CharacterAI export .zip or message .json file.' });
             }
-        });
+
+            const buffer = Buffer.isBuffer(uploadedFile.buffer)
+                ? uploadedFile.buffer
+                : fs.readFileSync(uploadedFile.path);
+            if (!buffer.length) {
+                return res.status(400).json({ error: 'Uploaded export file is empty.' });
+            }
+
+            const clientKey = typeof req.body?.clientKey === 'string' && /^[a-f0-9]{48}$/.test(req.body.clientKey)
+                ? req.body.clientKey
+                : null;
+            const created = createSession(clientKey);
+            sessionId = created.id;
+            let parsed;
+            let imageCount = 0;
+            if (isZip) {
+                const extracted = extractExportZip(buffer, created.dir);
+                parsed = parseExport(extracted.files.messages, extracted.files.characters, extracted.files.user);
+                imageCount = extracted.imageCount;
+            } else {
+                const messagesPath = path.join(created.dir, 'message.json');
+                fs.writeFileSync(messagesPath, buffer);
+                parsed = parseExport(messagesPath, null, null);
+            }
+
+            const session = getSession(sessionId);
+            session.data.parsed = parsed;
+            session.data.imageCount = imageCount;
+            markProcessStep(session, 'chats');
+
+            return res.json({
+                sessionId,
+                user: parsed.user,
+                stats: parsed.stats,
+                imageCount,
+                chats: summarizeChats(parsed),
+                characters: parsed.characters.map((c) => ({
+                    key: c.key,
+                    name: c.name,
+                    title: c.title,
+                    greetingPreview: String(c.greeting || '').slice(0, 160),
+                    hasDefinition: !!c.definition,
+                })),
+            });
+        } catch (error) {
+            if (sessionId) {
+                destroySession(sessionId);
+            }
+            console.error('[migration-assistant] upload failed:', error.message);
+            return res.status(400).json({ error: 'Could not process the uploaded export.' });
+        } finally {
+            if (uploadedFile?.path) {
+                try {
+                    fs.unlinkSync(uploadedFile.path);
+                } catch (error) {
+                    if (error.code !== 'ENOENT') {
+                        console.warn('[migration-assistant] could not remove temporary upload:', error.message);
+                    }
+                }
+            }
+        }
     });
 
     router.get('/session/:sessionId/chat/:chatId', (req, res) => {

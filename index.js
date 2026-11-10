@@ -6,7 +6,8 @@ import { extension_settings } from '../../../extensions.js';
 const MODULE_NAME = 'st-migrationasst';
 const PLUGIN_ID = 'migration-assistant';
 const PLUGIN_BASE = `/api/plugins/${PLUGIN_ID}`;
-const EXTENSION_FOLDER = `scripts/extensions/third-party/${MODULE_NAME}`;
+const WIZARD_TEMPLATE_URL = new URL('./wizard.html', import.meta.url).href;
+const STYLESHEET_URL = new URL('./style.css?v=5', import.meta.url).href;
 
 const STEPS = ['upload', 'chats', 'match', 'search', 'import', 'profiles'];
 const THEME_STORAGE_KEY = 'migasst-theme-v2';
@@ -234,11 +235,28 @@ async function readStreamLimited(stream, maxBytes) {
 
 async function apiFetch(path, options = {}) {
     const opts = { ...options };
-    opts.headers = { ...(options.headers || {}) };
+    const isFormData = opts.body instanceof FormData;
+    opts.headers = {
+        ...getRequestHeaders({ omitContentType: isFormData || !opts.body }),
+        ...(options.headers || {}),
+    };
+    const method = String(opts.method || 'GET').toUpperCase();
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+        const tokenResponse = await fetch('/csrf-token', { credentials: 'same-origin' });
+        if (!tokenResponse.ok) {
+            throw new Error(`Could not refresh SillyTavern's CSRF token (HTTP ${tokenResponse.status}).`);
+        }
+        const tokenData = await tokenResponse.json();
+        if (typeof tokenData?.token !== 'string' || !tokenData.token) {
+            throw new Error('SillyTavern returned an invalid CSRF token.');
+        }
+        opts.headers['X-CSRF-Token'] = tokenData.token;
+    }
     if (opts.body && !(opts.body instanceof FormData)) {
         opts.headers['Content-Type'] = 'application/json';
         opts.body = JSON.stringify(opts.body);
     }
+    opts.credentials = 'same-origin';
     const res = await fetch(`${PLUGIN_BASE}${path}`, opts);
     if (!res.ok) {
         let message = `Request failed (${res.status})`;
@@ -525,17 +543,14 @@ function ensureAssets() {
         font.href = 'https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700&display=swap';
         document.head.append(preconnect1, preconnect2, font);
     }
-    const hasStylesheet = Array.from(document.querySelectorAll('link[rel="stylesheet"]')).some((stylesheet) => {
-        if (!stylesheet.href) {
-            return false;
-        }
-        return new URL(stylesheet.href).pathname.endsWith(`/${MODULE_NAME}/style.css`);
-    });
+    const stylesheetPath = new URL(STYLESHEET_URL).pathname;
+    const hasStylesheet = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+        .some((stylesheet) => stylesheet.href && new URL(stylesheet.href).pathname === stylesheetPath);
     if (!hasStylesheet && !document.getElementById('migasst_style_link')) {
         const link = document.createElement('link');
         link.id = 'migasst_style_link';
         link.rel = 'stylesheet';
-        link.href = `${EXTENSION_FOLDER}/style.css?v=4`;
+        link.href = STYLESHEET_URL;
         document.head.appendChild(link);
     }
 }
@@ -697,7 +712,7 @@ async function handleUpload(file) {
     const form = new FormData();
     state.clientKey = getClientKey();
     form.append('clientKey', state.clientKey);
-    form.append('export', file, file.name);
+    form.append('avatar', file, file.name);
     const cancelButton = document.getElementById('migasst_danger');
     if (cancelButton) {
         cancelButton.hidden = false;
@@ -1566,6 +1581,10 @@ function onBack() {
 }
 
 function bindWizardEvents(root) {
+    if (!root) {
+        console.error('[migration-assistant] cannot bind wizard events because the wizard markup is missing');
+        return;
+    }
     root.querySelector('#migasst_close')?.addEventListener('click', () => closeWizard());
     root.querySelector('#migasst_back')?.addEventListener('click', onBack);
     root.querySelector('#migasst_next')?.addEventListener('click', onNext);
@@ -1806,12 +1825,52 @@ async function mountUi() {
     ensureAssets();
     const $settingsHost = $(settingsHost);
     if (!document.getElementById('migration_assistant_settings')) {
-        const settingsHtml = await $.get(`${EXTENSION_FOLDER}/settings.html`);
-        $settingsHost.append(settingsHtml);
+        $settingsHost.append(`
+            <div class="migration-assistant-settings" id="migration_assistant_settings" data-theme="dark">
+                <div class="inline-drawer">
+                    <div class="inline-drawer-toggle inline-drawer-header">
+                        <b data-i18n="Migration Assistant">Migration Assistant</b>
+                        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+                    </div>
+                    <div class="inline-drawer-content">
+                        <div class="migasst-settings-card">
+                            <div class="migasst-settings-card-mark" aria-hidden="true"></div>
+                            <div class="migasst-settings-card-body">
+                                <p class="migasst-settings-kicker">CharacterAI → SillyTavern</p>
+                                <p class="migasst-settings-copy" data-i18n="migasst_settings_blurb">
+                                    Migrate CharacterAI exports into SillyTavern. Review chat sorting and character matches before anything is imported.
+                                </p>
+                                <div class="migasst-settings-actions">
+                                    <input type="submit" id="migasst_resume_migration" class="menu_button migasst-btn migasst-btn-ghost" hidden
+                                        value="Resume Migration" data-i18n="[value]Resume Migration">
+                                    <input type="submit" id="migasst_open_wizard" class="menu_button migasst-btn migasst-btn-primary"
+                                        value="Begin Migration" data-i18n="[value]Begin Migration">
+                                    <label class="migasst-theme-toggle">
+                                        <span id="migasst_theme_label">Dark mode</span>
+                                        <input type="checkbox" id="migasst_theme_toggle" role="switch" aria-label="Dark mode" checked aria-checked="true">
+                                        <span class="migasst-theme-track" aria-hidden="true"></span>
+                                    </label>
+                                </div>
+                                <p class="migasst-settings-copy migasst-resume-hint">
+                                    Close the wizard to pause at a review checkpoint. Resume it here, or cancel to delete the saved progress.
+                                </p>
+                                <div id="migasst_plugin_status" class="migasst-plugin-status" aria-live="polite"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `);
     }
     if (!document.getElementById('migasst_wizard')) {
-        const wizardHtml = await $.get(`${EXTENSION_FOLDER}/wizard.html`);
-        $('body').append(wizardHtml);
+        try {
+            const wizardHtml = await $.get(WIZARD_TEMPLATE_URL);
+            $('body').append(wizardHtml);
+        } catch (error) {
+            console.error('[migration-assistant] failed to load wizard.html:', error);
+            toastr.error('Migration Assistant could not load its wizard. Confirm wizard.html is installed beside index.js.', 'Migration Assistant');
+            return;
+        }
     }
     const wizard = document.getElementById('migasst_wizard');
     if (wizard) {
@@ -1819,12 +1878,6 @@ async function mountUi() {
     }
 
     $settingsHost.on('click', '#migasst_open_wizard, #migasst_resume_migration', openMigrationWindow);
-    $settingsHost.on('click', '#migasst_open_settings_page', () => {
-        const settingsPageWindow = window.open(`${EXTENSION_FOLDER}/settings.html`, '_blank', 'popup,width=760,height=720');
-        if (!settingsPageWindow) {
-            toastr.warning('Allow pop-ups to open the full settings page.');
-        }
-    });
     $settingsHost.on('input', '#migasst_theme_toggle', (event) => {
         applyTheme(event.target.checked ? 'dark' : 'light');
     });

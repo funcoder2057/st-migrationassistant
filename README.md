@@ -6,7 +6,7 @@ SillyTavern extension + server plugin that migrates **CharacterAI data exports**
 
 | Path | Role |
 |------|------|
-| `manifest.json`, `index.js`, `style.css`, `*.html` | UI extension (wizard + settings entry) |
+| `manifest.json`, `index.js`, `style.css`, `wizard.html` | UI extension (native Extensions panel + wizard) |
 | `api.js` | Character search facade (calls left blank / TBC) |
 | `server-plugin/` | Express plugin: zip extract, parse, match, import payloads |
 
@@ -47,7 +47,7 @@ Restart SillyTavern. The UI status line should read **Server plugin connected.**
 
 Character cards can also be added to unmatched clusters during Search. PNG card metadata is parsed as JSON and projected onto an explicit allowlist; arbitrary extensions and executable fields are not imported. Manual entries accept a greeting, description, definition, and optional image.
 
-The SillyTavern settings drawer follows the community extension settings pattern and provides **Open Settings Page**, **Begin Migration**, and a **Resume Migration** button when a session is active. Begin and Resume open a new SillyTavern window with the wizard ready at the saved step. Closing the wizard leaves the migration intact; progress and review choices are saved in the browser so the wizard can resume after navigation or reload while the server session is available. **Cancel Migration** explicitly removes the temporary session and saved progress.
+The SillyTavern **Extensions** panel provides a persistent light/dark switch, **Begin Migration**, and a **Resume Migration** button when a session is active. Begin and Resume open a full-size SillyTavern popup with the wizard ready at the saved step. Closing the wizard leaves the migration intact; progress and review choices are saved in the browser so the wizard can resume after navigation or reload while the server session is available. **Cancel Migration** explicitly removes the temporary session and saved progress.
 
 Work already running when the wizard is closed continues to its next user-input checkpoint. Chat and character imports record completed items so resuming does not intentionally repeat successful imports.
 
