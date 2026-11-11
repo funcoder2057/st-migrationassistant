@@ -46,13 +46,15 @@
 }
 
 #migasst_wizard.migasst-wizard[data-theme="dark"] {
-    --mig-blue-soft: rgba(6, 71, 137, 0.35);
-    --mig-red-soft: rgba(222, 26, 26, 0.18);
+    --mig-blue: #72bcff;
+    --mig-blue-deep: #064789;
+    --mig-blue-soft: #d7eaff;
+    --mig-red-soft: #f8d4d4;
     --mig-light: #000000;
-    --mig-paper: #000000;
+    --mig-paper: #EBF2FA;
     --mig-dark: #EBF2FA;
     --mig-ink: #EBF2FA;
-    --mig-sage: #EBF2FA;
+    --mig-sage: #C4D0DC;
     --mig-line: #444444ba;
     --mig-shadow: 0 28px 80px rgba(0, 0, 0, 0.55);
     color-scheme: dark;
@@ -96,42 +98,51 @@
 
 #migasst_wizard[data-theme="dark"] .migasst-dropzone {
     background:
-        linear-gradient(135deg, rgba(6, 71, 137, 0.2), rgba(0, 0, 0, 0.9)),
-        repeating-linear-gradient(-32deg, rgba(6, 71, 137, 0.1) 0 10px, transparent 10px 20px),
+        linear-gradient(135deg, rgba(114, 188, 255, 0.12), rgba(235, 242, 250, 0.94)),
+        repeating-linear-gradient(-32deg, rgba(6, 71, 137, 0.055) 0 10px, transparent 10px 20px),
         var(--mig-paper);
+    border-color: rgba(114, 188, 255, 0.72);
 }
 
 #migasst_wizard[data-theme="dark"] .migasst-drop-box,
 #migasst_wizard[data-theme="dark"] .migasst-metric,
 #migasst_wizard[data-theme="dark"] .migasst-stat-pill,
-#migasst_wizard[data-theme="dark"] .migasst-empty {
-    background: #000000;
-    border-color: #444444ba;
+#migasst_wizard[data-theme="dark"] .migasst-empty,
+#migasst_wizard[data-theme="dark"] .migasst-card,
+#migasst_wizard[data-theme="dark"] .migasst-row,
+#migasst_wizard[data-theme="dark"] .migasst-msg,
+#migasst_wizard[data-theme="dark"] .migasst-input,
+#migasst_wizard[data-theme="dark"] .migasst-textarea {
+    background: #EBF2FA !important;
+    border-color: #aebdcb !important;
+    color: #011502 !important;
+    color-scheme: light;
 }
 
 #migasst_wizard[data-theme="dark"] .migasst-drop-title,
+#migasst_wizard[data-theme="dark"] .migasst-drop-sub,
+#migasst_wizard[data-theme="dark"] .migasst-drop-zip,
+#migasst_wizard[data-theme="dark"] .migasst-metric span,
 #migasst_wizard[data-theme="dark"] .migasst-metric em,
-#migasst_wizard[data-theme="dark"] .migasst-msg,
+#migasst_wizard[data-theme="dark"] .migasst-stat-pill,
+#migasst_wizard[data-theme="dark"] .migasst-msg-top,
+#migasst_wizard[data-theme="dark"] .migasst-msg-body,
+#migasst_wizard[data-theme="dark"] .migasst-card-title,
+#migasst_wizard[data-theme="dark"] .migasst-card-meta,
+#migasst_wizard[data-theme="dark"] .migasst-card-preview,
+#migasst_wizard[data-theme="dark"] .migasst-row-meta,
+#migasst_wizard[data-theme="dark"] .migasst-row-preview,
+#migasst_wizard[data-theme="dark"] .migasst-import-target-label,
+#migasst_wizard[data-theme="dark"] .migasst-check,
+#migasst_wizard[data-theme="dark"] .migasst-profile-type,
+#migasst_wizard[data-theme="dark"] .migasst-manual-box .migasst-file-picker,
+#migasst_wizard[data-theme="dark"] .migasst-empty,
 #migasst_wizard[data-theme="dark"] .migasst-row-title {
-    color: #EBF2FA;
+    color: #011502;
 }
 
 #migasst_wizard[data-theme="dark"] .migasst-backdrop {
     background: rgba(0, 0, 0, 0.78);
-}
-
-#migasst_wizard[data-theme="dark"] .migasst-input,
-#migasst_wizard[data-theme="dark"] .migasst-textarea,
-#migasst_wizard[data-theme="dark"] .migasst-card,
-#migasst_wizard[data-theme="dark"] .migasst-row,
-#migasst_wizard[data-theme="dark"] .migasst-msg {
-    background: #000000 !important;
-    border-color: #444444ba !important;
-    color: #EBF2FA !important;
-}
-
-#migasst_wizard[data-theme="dark"] .migasst-row-preview {
-    color: #EBF2FA;
 }
 
 #migasst_wizard[data-theme="dark"] .migasst-badge.warn {
@@ -140,7 +151,11 @@
 }
 
 #migasst_wizard[data-theme="dark"] .migasst-btn-primary {
-    color: #ebf2fa !important;
+    color: #000000 !important;
+}
+
+#migasst_wizard[data-theme="dark"] .migasst-btn-primary:hover:not(:disabled) {
+    background: #95ccff !important;
 }
 
 #migasst_wizard[data-theme="dark"] .migasst-btn-ghost {
@@ -148,14 +163,44 @@
     box-shadow: inset 0 0 0 1px #444444ba;
 }
 
-#migasst_wizard[data-theme="dark"] .migasst-manual-box {
-    background: rgba(6, 71, 137, 0.12);
-    border-color: #064789;
+#migasst_wizard[data-theme="dark"] .migasst-row .migasst-btn-ghost,
+#migasst_wizard[data-theme="dark"] .migasst-card .migasst-btn-ghost,
+#migasst_wizard[data-theme="dark"] .migasst-msg .migasst-btn-ghost {
+    color: #011502 !important;
+    box-shadow: inset 0 0 0 1px #8292a2;
 }
 
-#migasst_wizard[data-theme="dark"] .migasst-msg {
-    background: #000000;
-    border-color: #444444ba;
+#migasst_wizard[data-theme="dark"] .migasst-status {
+    background: #d7eaff;
+    border-color: #72bcff;
+    color: #011502;
+}
+
+#migasst_wizard[data-theme="dark"] .migasst-status.is-error {
+    background: #f8d4d4;
+    border-color: #de1a1a;
+    color: #5b1010;
+}
+
+#migasst_wizard[data-theme="dark"] .migasst-manual-box {
+    background: rgba(114, 188, 255, 0.12);
+    border-color: rgba(114, 188, 255, 0.4);
+}
+
+#migasst_wizard[data-theme="dark"] .migasst-long-task {
+    color: #011502;
+}
+
+#migasst_wizard[data-theme="dark"] .migasst-metric span {
+    color: #064789;
+}
+
+#migasst_wizard[data-theme="dark"] .migasst-row.is-warn {
+    border-color: #72bcff !important;
+}
+
+#migasst_wizard[data-theme="dark"] .migasst-card.is-warn::before {
+    background: #064789;
 }
 
 #migasst_wizard.migasst-wizard.is-open,
@@ -186,6 +231,18 @@
     box-shadow: var(--mig-shadow);
     text-align: center;
     pointer-events: none;
+}
+
+#migasst_wizard .migasst-long-task-inline {
+    position: relative;
+    inset: auto;
+    transform: none;
+    width: 100%;
+    margin: 1rem 0 0;
+}
+
+#migasst_wizard .migasst-long-task-inline[hidden] {
+    display: none !important;
 }
 
 #migasst_wizard .migasst-long-task-spinner {
@@ -382,14 +439,34 @@
     cursor: not-allowed;
 }
 
+#migasst_wizard[data-theme="dark"] .migasst-step-btn:disabled {
+    opacity: 0.72;
+}
+
 #migasst_wizard .migasst-step.is-active .migasst-step-btn {
     background: rgba(6, 71, 137, 0.38) !important;
     color: var(--mig-light) !important;
     box-shadow: inset 0 0 0 1px rgba(6, 71, 137, 0.65);
 }
 
+#migasst_wizard[data-theme="dark"] .migasst-step.is-active .migasst-step-btn {
+    background: rgba(114, 188, 255, 0.18) !important;
+    color: #EBF2FA !important;
+    box-shadow: inset 0 0 0 1px rgba(114, 188, 255, 0.58);
+}
+
 #migasst_wizard .migasst-step.is-done .migasst-step-btn {
     color: var(--mig-light) !important;
+}
+
+#migasst_wizard[data-theme="dark"] .migasst-step.is-done .migasst-step-btn {
+    color: #EBF2FA !important;
+}
+
+#migasst_wizard[data-theme="dark"] .migasst-step.is-done .migasst-step-index {
+    background: #72bcff;
+    border-color: #72bcff;
+    color: #011502;
 }
 
 #migasst_wizard .migasst-step-index {
@@ -410,6 +487,10 @@
 #migasst_wizard .migasst-step.is-active .migasst-step-index {
     background: var(--mig-blue);
     border-color: var(--mig-blue);
+}
+
+#migasst_wizard[data-theme="dark"] .migasst-step.is-active .migasst-step-index {
+    color: #011502;
 }
 
 #migasst_wizard .migasst-step.is-done .migasst-step-index {
@@ -996,6 +1077,92 @@
     font: inherit;
 }
 
+#migasst_wizard .migasst-card-upload-btn {
+    position: relative;
+    display: inline-flex;
+    min-height: 44px;
+    width: fit-content;
+    max-width: 100%;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+    padding: 0.65rem 0.9rem;
+    overflow: hidden;
+    border: 1px solid var(--mig-blue);
+    border-radius: 9px;
+    background: var(--mig-blue);
+    color: #fff;
+    font-size: 0.84rem;
+    font-weight: 650;
+    cursor: pointer;
+    transition: background 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+}
+
+#migasst_wizard .migasst-card-upload-btn:hover {
+    background: var(--mig-blue-deep);
+    box-shadow: 0 5px 16px rgba(6, 71, 137, 0.24);
+    transform: translateY(-1px);
+}
+
+#migasst_wizard .migasst-card-upload-btn:focus-within {
+    outline: 2px solid var(--mig-blue);
+    outline-offset: 3px;
+}
+
+#migasst_wizard .migasst-card-upload-btn svg {
+    width: 18px;
+    height: 18px;
+    flex: none;
+}
+
+#migasst_wizard .migasst-card-upload-btn small {
+    margin-left: 0.2rem;
+    color: rgba(255, 255, 255, 0.78);
+    font-size: 0.7rem;
+    font-weight: 500;
+}
+
+#migasst_wizard .migasst-card-upload-btn input[type="file"] {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+    cursor: pointer;
+}
+
+#migasst_wizard[data-theme="dark"] .migasst-card-upload-btn {
+    color: #011502;
+}
+
+#migasst_wizard[data-theme="dark"] .migasst-card-upload-btn small {
+    color: #435064;
+}
+
+#migasst_wizard[data-theme="dark"] .migasst-card-upload-btn:hover {
+    background: #95ccff;
+}
+
+#migasst_wizard .migasst-import-target-label {
+    display: grid;
+    gap: 0.35rem;
+    min-width: min(230px, 100%);
+    color: var(--mig-sage);
+    font-size: 0.72rem;
+    text-align: left;
+}
+
+#migasst_wizard .migasst-import-target {
+    min-width: 0;
+    padding: 0.48rem 0.6rem !important;
+    font-size: 0.78rem !important;
+}
+
+#migasst_wizard .migasst-import-target:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+}
+
 #migasst_wizard .migasst-profile-fields {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1007,6 +1174,11 @@
 #migasst_wizard .migasst-profile-fields > .migasst-row-meta,
 #migasst_wizard .migasst-profile-fields > .migasst-file-picker {
     grid-column: 1 / -1;
+}
+
+#migasst_wizard[data-theme="dark"] .migasst-profile-type,
+#migasst_wizard[data-theme="dark"] .migasst-file-picker {
+    color: #011502;
 }
 
 .migration-assistant-settings .migasst-theme-toggle {
@@ -1225,7 +1397,9 @@
 }
 
 .migration-assistant-settings[data-theme="dark"] {
-    --mig-blue-soft: rgba(6, 71, 137, 0.35);
+    --mig-blue: #72bcff;
+    --mig-blue-deep: #064789;
+    --mig-blue-soft: #d7eaff;
     --mig-red-soft: rgba(222, 26, 26, 0.18);
     --mig-light: #000000;
     --mig-paper: #000000;
@@ -1281,12 +1455,16 @@
 }
 
 .migration-assistant-settings[data-theme="dark"] .migasst-theme-toggle input:checked + .migasst-theme-track {
-    border-color: #064789;
-    background: #064789;
+    border-color: #72bcff;
+    background: #72bcff;
 }
 
 .migration-assistant-settings[data-theme="dark"] .migasst-btn-primary {
-    color: #ebf2fa !important;
+    color: #000000 !important;
+}
+
+.migration-assistant-settings[data-theme="dark"] .migasst-btn-primary:hover:not(:disabled) {
+    background: #95ccff !important;
 }
 
 .migration-assistant-settings .migasst-settings-card-mark {

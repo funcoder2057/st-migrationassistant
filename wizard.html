@@ -4,7 +4,7 @@
     <div class="migasst-backdrop" aria-hidden="true"></div>
     <div id="migasst_long_task" class="migasst-long-task" hidden role="status" aria-live="polite" aria-atomic="true">
         <span class="migasst-long-task-spinner" aria-hidden="true"></span>
-        <p id="migasst_long_task_message"></p>
+        <p data-long-task-message></p>
     </div>
 
     <div class="migasst-shell">
@@ -99,6 +99,11 @@
                 <section class="migasst-panel is-visible" data-panel="upload" aria-labelledby="migasst_heading">
                     <p class="migasst-lede" data-i18n="migasst_upload_help">Upload a CharacterAI export ZIP or just its message.json. Character information can be added later.</p>
 
+                    <div id="migasst_upload_long_task" class="migasst-long-task migasst-long-task-inline" hidden role="status" aria-live="polite" aria-atomic="true">
+                        <span class="migasst-long-task-spinner" aria-hidden="true"></span>
+                        <p data-long-task-message></p>
+                    </div>
+
                     <label class="migasst-dropzone" id="migasst_dropzone" for="migasst_file">
                         <input type="file" id="migasst_file" name="export" accept=".zip,.json,application/zip,application/json" autocomplete="off" hidden>
                         <div class="migasst-drop-visual" aria-hidden="true">
@@ -153,7 +158,7 @@
 
                 <!-- IMPORT -->
                 <section class="migasst-panel" data-panel="import">
-                    <p class="migasst-lede" data-i18n="migasst_import_help">Review the final plan. Uncheck anything you don’t want. Import prepares SillyTavern character + chat payloads from the confirmed actions.</p>
+                    <p class="migasst-lede" data-i18n="migasst_import_help">Choose a new or existing character for each chat group. Existing character cards are not modified; only their chats are added. Uncheck anything you don’t want.</p>
                     <div class="migasst-stat-pill" id="migasst_import_stats" aria-live="polite"></div>
                     <div class="migasst-list" id="migasst_import_list" role="list"></div>
                     <div id="migasst_import_result" class="migasst-status" hidden role="status" aria-live="polite"></div>

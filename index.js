@@ -8,7 +8,7 @@ const PLUGIN_ID = 'migration-assistant';
 const RUNTIME_KEY = '__stMigrationAssistantMounted';
 const PLUGIN_BASE = `/api/plugins/${PLUGIN_ID}`;
 const WIZARD_TEMPLATE_URL = new URL('./wizard.html', import.meta.url).href;
-const STYLESHEET_URL = new URL('./style.css?v=7', import.meta.url).href;
+const STYLESHEET_URL = new URL('./style.css?v=10', import.meta.url).href;
 
 const STEPS = ['upload', 'chats', 'match', 'search', 'import', 'profiles'];
 const THEME_STORAGE_KEY = 'migasst-theme-v2';
@@ -45,8 +45,10 @@ const state = {
     profilesImported: false,
     importCompleted: false,
     importPrepared: false,
+    importInProgress: false,
     importedClusterIds: new Set(),
     importedCharacterFiles: new Map(),
+    importTargets: new Map(),
     clientKey: null,
 };
 
@@ -59,6 +61,7 @@ let longTaskCount = 0;
 let longTaskShowTimer = null;
 let longTaskRotationTimer = null;
 let longTaskMessageIndex = 0;
+let longTaskIsUpload = false;
 
 const LONG_TASK_MESSAGES = [
     'Still working. Your migration is in progress.',
@@ -69,6 +72,13 @@ const LONG_TASK_MESSAGES = [
 
 function getContext() {
     return SillyTavern.getContext();
+}
+
+function getExistingCharacters() {
+    const characters = getContext().characters;
+    return Array.isArray(characters)
+        ? characters.filter((character) => typeof character.avatar === 'string' && character.avatar)
+        : [];
 }
 
 function escapeHtml(text) {
@@ -358,6 +368,7 @@ function makeProgressSnapshot() {
         importPrepared: state.importPrepared,
         importedClusterIds: [...state.importedClusterIds],
         importedCharacterFiles: [...state.importedCharacterFiles.entries()],
+        importTargets: [...state.importTargets.entries()],
     };
 }
 
@@ -459,6 +470,7 @@ async function recoverExpiredSession(error) {
     state.importPrepared = false;
     state.importedClusterIds.clear();
     state.importedCharacterFiles.clear();
+    state.importTargets.clear();
     state.stats = null;
     state.openChatId = null;
     state.step = 'upload';
@@ -518,6 +530,7 @@ function restoreSnapshot(snapshot, saved) {
     state.importPrepared = !!(snapshot.importPrepared || saved?.importPrepared);
     state.importedClusterIds = new Set(saved?.importedClusterIds || []);
     state.importedCharacterFiles = new Map(saved?.importedCharacterFiles || []);
+    state.importTargets = new Map(saved?.importTargets || []);
     const savedStep = STEPS.includes(snapshot.step)
         ? snapshot.step
         : saved?.sessionId === snapshot.sessionId && STEPS.includes(saved.step)
@@ -635,14 +648,13 @@ function setStatus(el, text, isError = false) {
 }
 
 function updateLongTaskMessage() {
-    const message = document.getElementById('migasst_long_task_message');
-    if (message) {
+    document.querySelectorAll('[data-long-task-message]').forEach((message) => {
         message.textContent = LONG_TASK_MESSAGES[longTaskMessageIndex];
-    }
+    });
 }
 
 function showLongTask() {
-    const indicator = document.getElementById('migasst_long_task');
+    const indicator = document.getElementById(longTaskIsUpload ? 'migasst_upload_long_task' : 'migasst_long_task');
     if (!indicator || longTaskCount === 0) {
         return;
     }
@@ -655,9 +667,10 @@ function showLongTask() {
     }, 5 * 60 * 1000);
 }
 
-async function withLongTask(operation) {
+async function withLongTask(operation, isUpload = false) {
     longTaskCount += 1;
     if (longTaskCount === 1) {
+        longTaskIsUpload = isUpload;
         longTaskShowTimer = setTimeout(showLongTask, 5000);
     }
     try {
@@ -669,10 +682,9 @@ async function withLongTask(operation) {
             clearInterval(longTaskRotationTimer);
             longTaskShowTimer = null;
             longTaskRotationTimer = null;
-            const indicator = document.getElementById('migasst_long_task');
-            if (indicator) {
+            document.querySelectorAll('.migasst-long-task').forEach((indicator) => {
                 indicator.hidden = true;
-            }
+            });
         }
     }
 }
@@ -848,7 +860,7 @@ function goToStep(step) {
 }
 
 function handleUpload(file) {
-    return withLongTask(() => performUpload(file));
+    return withLongTask(() => performUpload(file), true);
 }
 
 async function performUpload(file) {
@@ -887,6 +899,7 @@ async function performUpload(file) {
         state.importPrepared = false;
         state.importedClusterIds.clear();
         state.importedCharacterFiles.clear();
+        state.importTargets.clear();
         const characterLabel = data.stats?.characterCount
             ? ` · ${data.stats.characterCount} export characters`
             : ' · no character data (you can add cards later)';
@@ -1104,8 +1117,11 @@ function renderSearchList() {
                     <textarea class="migasst-textarea" data-field="greeting" placeholder="Greeting">${escapeHtml(cluster.greetingPreview || '')}</textarea>
                     <textarea class="migasst-textarea" data-field="description" placeholder="Optional description"></textarea>
                     <textarea class="migasst-textarea" data-field="definition" placeholder="Optional definition / personality"></textarea>
-                    <label class="migasst-file-picker">Import a character card (PNG or JSON)
-                        <input type="file" data-field="card" accept=".png,.json,image/png,application/json">
+                    <label class="migasst-card-upload-btn">
+                        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 13V3m0 0L6.5 6.5M10 3l3.5 3.5M4 12.5v3A1.5 1.5 0 0 0 5.5 17h9a1.5 1.5 0 0 0 1.5-1.5v-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        <span>Upload character card</span>
+                        <small>PNG or JSON</small>
+                        <input type="file" data-field="card" accept=".png,.json,image/png,application/json" aria-label="Upload character card PNG or JSON">
                     </label>
                     <label class="migasst-file-picker">Optional character image (PNG or JPEG)
                         <input type="file" data-field="image" accept="image/png,image/jpeg,.png,.jpg,.jpeg">
@@ -1274,6 +1290,8 @@ function renderImportList() {
     if (!list) {
         return;
     }
+    const characters = getExistingCharacters()
+        .sort((a, b) => String(a.name || a.avatar).localeCompare(String(b.name || b.avatar)));
     list.innerHTML = state.planItems.map((item, i) => `
         <article class="migasst-row" data-cluster-id="${escapeHtml(item.clusterId)}" style="animation-delay:${Math.min(i, 12) * 25}ms">
             <div>
@@ -1285,14 +1303,20 @@ function renderImportList() {
                 <p class="migasst-row-preview">${escapeHtml(item.firstMesPreview || '')}</p>
             </div>
             <div class="migasst-row-actions">
-                <label class="migasst-check"><input type="checkbox" data-action="toggle-include" ${item.include !== false ? 'checked' : ''}> Include</label>
+                <label class="migasst-import-target-label">Send chats to
+                    <select class="migasst-input migasst-import-target" data-action="target-character" aria-label="Choose a SillyTavern character for these chats"${state.importInProgress || state.importCharacterFiles.has(item.clusterId) ? ' disabled' : ''}>
+                        <option value="">Create new: ${escapeHtml(item.name)}</option>
+                        ${characters.map((character) => `<option value="${escapeHtml(character.avatar)}"${state.importTargets.get(item.clusterId) === character.avatar ? ' selected' : ''}>Existing: ${escapeHtml(character.name || character.avatar)}</option>`).join('')}
+                    </select>
+                </label>
+                <label class="migasst-check"><input type="checkbox" data-action="toggle-include"${state.importInProgress ? ' disabled' : ''} ${item.include !== false ? 'checked' : ''}> Include</label>
             </div>
         </article>
     `).join('');
 }
 
 async function runImport() {
-    if (!state.sessionId) {
+    if (!state.sessionId || state.importInProgress) {
         return;
     }
     if (state.importCompleted) {
@@ -1307,6 +1331,12 @@ async function runImport() {
         })
         .map((item) => item.clusterId);
 
+    state.importInProgress = true;
+    renderImportList();
+    const nextButton = document.getElementById('migasst_next');
+    if (nextButton) {
+        nextButton.disabled = true;
+    }
     setStatus(result, 'Materializing import payloads…');
     try {
         const data = await apiFetch(`/session/${state.sessionId}/import`, {
@@ -1324,8 +1354,16 @@ async function runImport() {
             }
             try {
                 let avatarUrl = state.importedCharacterFiles.get(payload.clusterId);
-                if (!avatarUrl) {
+                const selectedTarget = state.importTargets.get(payload.clusterId);
+                if (selectedTarget) {
+                    if (!getExistingCharacters().some((character) => character.avatar === selectedTarget)) {
+                        throw new Error('The selected SillyTavern character is no longer available. Choose another destination before importing.');
+                    }
+                    avatarUrl = selectedTarget;
+                } else if (!avatarUrl) {
                     avatarUrl = await importCharacterPayload(payload);
+                }
+                if (avatarUrl) {
                     state.importedCharacterFiles.set(payload.clusterId, avatarUrl);
                     await persistProgress();
                 }
@@ -1351,6 +1389,14 @@ async function runImport() {
             return;
         }
         setStatus(result, error.message || 'Import failed.', true);
+    } finally {
+        state.importInProgress = false;
+        if (state.step === 'import') {
+            renderImportList();
+            if (nextButton) {
+                nextButton.disabled = false;
+            }
+        }
     }
 }
 
@@ -1733,6 +1779,7 @@ async function discardSession() {
     state.importPrepared = false;
     state.importedClusterIds.clear();
     state.importedCharacterFiles.clear();
+    state.importTargets.clear();
     state.chatOverrides.clear();
     state.matchOverrides.clear();
     state.clientKey = null;
@@ -1969,13 +2016,21 @@ function bindWizardEvents(root) {
         }
     });
     root.querySelector('#migasst_import_list')?.addEventListener('change', (event) => {
-        if (event.target.dataset.action !== 'toggle-include') {
-            return;
-        }
         const row = event.target.closest('[data-cluster-id]');
         const item = state.planItems.find((planItem) => planItem.clusterId === row?.dataset.clusterId);
-        if (item) {
+        if (!item) {
+            return;
+        }
+        if (event.target.dataset.action === 'toggle-include') {
             item.include = event.target.checked;
+            persistProgressSoon();
+        } else if (event.target.dataset.action === 'target-character') {
+            const target = event.target.value;
+            if (target) {
+                state.importTargets.set(item.clusterId, target);
+            } else {
+                state.importTargets.delete(item.clusterId);
+            }
             persistProgressSoon();
         }
     });
