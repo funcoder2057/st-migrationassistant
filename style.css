@@ -277,10 +277,7 @@
 #migasst_wizard .migasst-backdrop {
     position: absolute;
     inset: 0;
-    background:
-        radial-gradient(900px 520px at 12% 0%, rgba(6, 71, 137, 0.42), transparent 60%),
-        radial-gradient(720px 480px at 88% 12%, rgba(121, 128, 113, 0.28), transparent 55%),
-        linear-gradient(160deg, rgba(1, 21, 2, 0.82), rgba(1, 21, 2, 0.72));
+    background: #000000;
     backdrop-filter: blur(10px);
 }
 

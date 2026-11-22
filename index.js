@@ -15,7 +15,6 @@ const THEME_STORAGE_KEY = 'migasst-theme-v2';
 const CLIENT_KEY_STORAGE_KEY = 'migasst-client-key-v1';
 const PROGRESS_DB_NAME = 'migasst-progress-v1';
 const PROGRESS_STORE_NAME = 'workflows';
-const BEGIN_MIGRATION_PARAM = 'migasst_begin_migration';
 
 const STEP_META = {
     upload: { title: 'Drop your export', next: 'Continue' },
@@ -75,7 +74,7 @@ function getContext() {
 }
 
 function getExistingCharacters() {
-    const characters = getContext().characters;
+    const characters = getContext()?.characters || window.characters;
     return Array.isArray(characters)
         ? characters.filter((character) => typeof character.avatar === 'string' && character.avatar)
         : [];
@@ -767,22 +766,24 @@ function closeWizard() {
 }
 
 function openMigrationWindow() {
-    const target = new URL(window.location.href);
-    target.searchParams.set(BEGIN_MIGRATION_PARAM, '1');
-    const migrationWindow = window.open(target.toString(), '_blank', 'popup,width=1280,height=900');
-    if (!migrationWindow) {
-        toastr.warning('Allow pop-ups to open the Migration Assistant in a new window.');
-    }
+    openWizard();
 }
 
-function consumeBeginMigrationRequest() {
-    const currentUrl = new URL(window.location.href);
-    if (currentUrl.searchParams.get(BEGIN_MIGRATION_PARAM) !== '1') {
-        return false;
+async function beginNewMigration() {
+    if (state.sessionId) {
+        const { Popup } = getContext();
+        const confirmed = Popup?.show?.confirm
+            ? await Popup.show.confirm(
+                'Start a new migration?',
+                'This will permanently remove the saved migration that is available to resume.',
+            )
+            : window.confirm('Start a new migration? This will permanently remove the saved migration that is available to resume.');
+        if (!confirmed) {
+            return;
+        }
+        await discardSession(false);
     }
-    currentUrl.searchParams.delete(BEGIN_MIGRATION_PARAM);
-    history.replaceState(history.state, '', currentUrl);
-    return true;
+    openWizard();
 }
 
 function setNextLabel(label) {
@@ -1304,9 +1305,10 @@ function renderImportList() {
             </div>
             <div class="migasst-row-actions">
                 <label class="migasst-import-target-label">Send chats to
-                    <select class="migasst-input migasst-import-target" data-action="target-character" aria-label="Choose a SillyTavern character for these chats"${state.importInProgress || state.importCharacterFiles.has(item.clusterId) ? ' disabled' : ''}>
+                    <select class="migasst-input migasst-import-target" data-action="target-character" aria-label="Choose a SillyTavern character for these chats"${state.importInProgress || state.importedCharacterFiles.has(item.clusterId) ? ' disabled' : ''}>
                         <option value="">Create new: ${escapeHtml(item.name)}</option>
                         ${characters.map((character) => `<option value="${escapeHtml(character.avatar)}"${state.importTargets.get(item.clusterId) === character.avatar ? ' selected' : ''}>Existing: ${escapeHtml(character.name || character.avatar)}</option>`).join('')}
+                        ${characters.length ? '' : '<option disabled>No SillyTavern characters are currently available</option>'}
                     </select>
                 </label>
                 <label class="migasst-check"><input type="checkbox" data-action="toggle-include"${state.importInProgress ? ' disabled' : ''} ${item.include !== false ? 'checked' : ''}> Include</label>
@@ -1737,17 +1739,19 @@ function finishProfiles(message, isError = false) {
     void persistProgress();
 }
 
-async function discardSession() {
+async function discardSession(askConfirmation = true) {
     if (!state.sessionId && !state.clientKey) {
         closeWizard();
         return;
     }
-    const { Popup } = getContext();
-    const ok = Popup?.show?.confirm
-        ? await Popup.show.confirm('Cancel migration?', 'This deletes the saved progress and temporary migration data. Closing the wizard keeps it available to resume.')
-        : window.confirm('Cancel migration and delete its saved progress?');
-    if (!ok) {
-        return;
+    if (askConfirmation) {
+        const { Popup } = getContext();
+        const ok = Popup?.show?.confirm
+            ? await Popup.show.confirm('Cancel migration?', 'This deletes the saved progress and temporary migration data. Closing the wizard keeps it available to resume.')
+            : window.confirm('Cancel migration and delete its saved progress?');
+        if (!ok) {
+            return;
+        }
     }
     try {
         if (activeUploadController) {
@@ -2161,7 +2165,8 @@ async function mountUi() {
         wizard.hidden = true;
     }
 
-    $settingsHost.on('click', '#migasst_open_wizard, #migasst_resume_migration', openMigrationWindow);
+    $settingsHost.on('click', '#migasst_open_wizard', beginNewMigration);
+    $settingsHost.on('click', '#migasst_resume_migration', openMigrationWindow);
     $settingsHost.on('input', '#migasst_theme_toggle', (event) => {
         applyTheme(event.target.checked ? 'dark' : 'light');
     });
